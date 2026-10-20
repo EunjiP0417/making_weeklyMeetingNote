@@ -1012,7 +1012,7 @@ class App(tk.Tk):
         card.grid(row=0, column=0, sticky='ew', pady=(0, 10))
         body = card.body
         ttk.Label(body, text='01  지난주 최종본', style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(body, text='생방기술2의 계획을 이번 주 실적으로', style='Muted.TLabel').pack(anchor='w', pady=(3, 10))
+        ttk.Label(body, text='지난 주 계획을 이번 주 실적으로', style='Muted.TLabel').pack(anchor='w', pady=(3, 10))
         ttk.Entry(body, textvariable=self.previous_text, state='readonly', width=28).pack(fill='x')
         ttk.Button(body, text='최종본 선택', command=self.choose_previous).pack(fill='x', pady=(10, 0))
 
@@ -1038,14 +1038,13 @@ class App(tk.Tk):
         body = card.body
         ttk.Label(body, text='03  날짜와 저장 위치', style='Heading.TLabel').pack(anchor='w')
         date_row = ttk.Frame(body)
-        date_row.pack(fill='x', pady=(12, 4))
+        date_row.pack(fill='x', pady=(12, 10))
         self.date_entry = ttk.Entry(date_row, textvariable=self.date, width=13)
         self.date_entry.pack(side='left', fill='x', expand=True)
         self.date_entry.bind('<Button-1>', lambda e: self.open_calendar())
         self.date_entry.bind('<Alt-Down>', lambda e: self.open_calendar())
         self.date_entry.bind('<Escape>', lambda e: self.close_calendar())
         ttk.Label(date_row, textvariable=self.weekday, style='Accent.TLabel').pack(side='left', padx=(8, 0))
-        ttk.Label(body, text='직접 입력하거나 달력에서 선택하세요', style='Muted.TLabel').pack(anchor='w', pady=(0, 10))
         ttk.Entry(body, textvariable=self.output, state='readonly', width=28).pack(fill='x')
         ttk.Button(body, text='저장 폴더 선택', command=self.choose_output).pack(fill='x', pady=(8, 0))
 
@@ -1056,7 +1055,7 @@ class App(tk.Tk):
         card = Card(right)
         card.grid(row=0, column=0, sticky='nsew', pady=(0, 10))
         body = card.body
-        ttk.Label(body, text='업무 순서', style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(body, text='회의자료 순서', style='Heading.TLabel').pack(anchor='w')
         ttk.Label(body, text='두 항목 모두 드래그 또는 이동 버튼으로 조정할 수 있습니다.', style='Muted.TLabel').pack(anchor='w', pady=(4, 6))
         self.preview_label = ttk.Label(body, textvariable=self.preview_state, style='Accent.TLabel', wraplength=round(500*self.ui_scale))
         self.preview_label.pack(anchor='w', fill='x', pady=(0, 12))
