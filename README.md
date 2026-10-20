@@ -68,6 +68,7 @@ dist/생방기술국_회의자료_취합.exe
 업무보고_자동취합.py             GUI와 한글 문서 취합 처리
 build_exe.py                    PyInstaller 빌드 스크립트
 requirements.txt                검증한 패키지 버전
+AGENTS.md                       코드 수정·문서화·커밋·푸시 규칙
 assets/report_template.hwpx      내장 한글 양식
 assets/app.manifest             Windows 고해상도 설정
 assets/fonts/                   Pretendard 글꼴과 라이선스
@@ -75,6 +76,10 @@ docs/CHANGELOG.md                구현 내용과 검증 기록
 ```
 
 실제 회의자료, 개인 경로, EXE, 빌드 캐시와 백업 사본은 저장소 관리 대상에서 제외합니다.
+
+## 개발 작업 흐름
+
+코드를 수정하면 변경에 적합한 검증을 수행하고 `docs/CHANGELOG.md`에 작업 내용을 기록합니다. 사용 방법이 바뀌면 이 README도 갱신하며, 관련 코드와 문서를 같은 저장소에 커밋·푸시합니다. 자세한 상시 작업 규칙은 [AGENTS.md](AGENTS.md)를 참고하세요.
 
 ## 글꼴
 
