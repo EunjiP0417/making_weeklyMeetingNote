@@ -24,6 +24,8 @@ KINDS = ('추진실적', '추진계획')
 # 기본 화면과 주요 강조는 무채색, 보조 선택 표시만 차분한 파스텔 블루.
 ACCENT_BLUE = '#dce6f0'
 TEMPLATE_PATH = Path(__file__).resolve().parent / 'assets' / 'report_template.hwpx'
+APP_ICON = Path(__file__).resolve().parent / 'assets' / 'app.ico'
+APP_IMAGE = Path(__file__).resolve().parent / 'assets' / 'app.png'
 # 업무 제목: 1. 제목, 1.1. 제목, 4.1. 제목. 날짜/소수점은 제외.
 PREFIX = re.compile(r'^\s*(?:\d{1,3}\s*\.\s*)+(?!\d)')
 ITEM_TOKEN = re.compile(r'^\s*REPORT_ITEM_[0-9a-f]{32}\s*')
@@ -836,11 +838,78 @@ class Card(tk.Frame):
             smooth=True, splinesteps=24, fill='white', outline='', tags='card')
 
 
+def apply_app_icon(window):
+    if sys.platform == 'win32':
+        if isinstance(window, tk.Tk):
+            window.iconbitmap(default=str(APP_ICON))
+        window.iconbitmap(str(APP_ICON))
+    else:
+        window._app_icon = tk.PhotoImage(master=window, file=str(APP_IMAGE))
+        window.iconphoto(True, window._app_icon)
+
+
+class CompletionDialog(tk.Toplevel):
+    def __init__(self, owner, output):
+        super().__init__(owner)
+        self.withdraw()
+        self.title('취합 완료')
+        self.transient(owner)
+        self.resizable(False, False)
+        self.configure(bg='white')
+        self.ui_scale = owner.ui_scale
+        apply_app_icon(self)
+        body = ttk.Frame(self, padding=20, style='Card.TFrame')
+        body.pack(fill='both', expand=True)
+        row = ttk.Frame(body)
+        row.pack(fill='both', expand=True)
+        source = tk.PhotoImage(master=self, file=str(APP_IMAGE))
+        self.completion_icon = source.subsample(max(1, round(source.width()/(48*self.ui_scale))))
+        ttk.Label(row, image=self.completion_icon).pack(side='left', anchor='n', padx=(0, 16))
+        content = ttk.Frame(row)
+        content.pack(side='left', fill='both', expand=True)
+        self.path_label = ttk.Label(content, text=output, wraplength=round(440*self.ui_scale), style='Muted.TLabel')
+        self.path_label.pack(anchor='w')
+        self.message_label = ttk.Label(content, text='최종 파일을 확인하세요.')
+        self.message_label.pack(anchor='w', pady=(8, 0))
+        self.confirm_button = ttk.Button(body, text='확인', width=9, command=self.destroy)
+        self.confirm_button.pack(anchor='e', pady=(20, 0))
+        self.bind('<Return>', lambda e: self.destroy())
+        self.bind('<Escape>', lambda e: self.destroy())
+        scale_widget_spacing(body, self.ui_scale)
+        self.update_idletasks()
+        self.deiconify()
+        self.place_centered(owner)
+        self.grab_set()
+        self.confirm_button.focus_set()
+
+    def place_centered(self, owner):
+        left, top, right, bottom = display_metrics(owner)['work']
+        # 두 번 배치해 다른 배율의 모니터로 이동한 뒤의 창 테두리도 반영한다.
+        for _ in range(2):
+            self.update_idletasks()
+            info = display_metrics(self)
+            width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+            outer_width, outer_height = width+info['frame'][0], height+info['frame'][1]
+            x = max(left, min(owner.winfo_rootx()+(owner.winfo_width()-outer_width)//2, right-outer_width))
+            y = max(top, min(owner.winfo_rooty()+(owner.winfo_height()-outer_height)//2, bottom-outer_height))
+            if sys.platform == 'win32' and info['hwnd']:
+                import ctypes
+                from ctypes import wintypes
+                user32 = ctypes.windll.user32
+                user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                               ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+                user32.SetWindowPos(info['hwnd'], 0, x, y, outer_width, outer_height, 0x0014)
+            else:
+                self.geometry(f'{width}x{height}+{max(0, x)}+{max(0, y)}')
+        self.update_idletasks()
+
+
 class DatePicker(tk.Toplevel):
     def __init__(self, owner, selected, on_select):
         super().__init__(owner)
         self.withdraw()
         self.title('회의자료 날짜 선택')
+        apply_app_icon(self)
         self.transient(owner)
         self.resizable(False, False)
         self.configure(bg='white')
@@ -935,6 +1004,9 @@ class DatePicker(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self):
         enable_dpi_awareness()
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('KBS.WeeklyMeetingNote')
         super().__init__()
         self.withdraw()
         display = display_metrics(self)
@@ -947,6 +1019,7 @@ class App(tk.Tk):
         self.ui_scale = display['dpi']/96
         self.tk.call('tk', 'scaling', display['dpi']/72)
         self.title('주간 회의자료 취합')
+        apply_app_icon(self)
         self.configure(bg='#f2f2f2')
         self.setup_theme()
         max_width, max_height = self.display_limits(display)
@@ -967,6 +1040,7 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.busy = False
         self.calendar_popup = None
+        self.completion_popup = None
         self.date = tk.StringVar(value=dt.date.today().strftime('%Y.%m.%d.'))
         self.weekday = tk.StringVar(value=weekday_name(self.date.get())+'요일')
         self.output = tk.StringVar()
@@ -1588,7 +1662,7 @@ class App(tk.Tk):
                 if kind == 'error':
                     self.preview_state.set('오류가 발생했습니다. 아래 내용을 확인하세요.')
                 if kind == 'done':
-                    messagebox.showinfo('취합 완료', value + '\n표·그림 배치를 확인하세요.')
+                    self.completion_popup = CompletionDialog(self, value)
                 else:
                     messagebox.showerror('취합 실패', value)
         self.after(100, self.poll)

@@ -17,7 +17,9 @@ def main():
                      root / "assets" / "fonts" / "Pretendard-Bold.otf",
                      root / "assets" / "fonts" / "OFL.txt",
                      root / "assets" / "fonts" / "Pretendard-Medium.otf",
-                     root / "assets" / "app.manifest")
+                     root / "assets" / "app.manifest",
+                     root / "assets" / "app.ico",
+                     root / "assets" / "app.png")
         if not path.is_file()
     ]
 
@@ -78,6 +80,9 @@ def main():
         "--windowed",
         "--noupx",
 
+        "--icon",
+        str(root / "assets" / "app.ico"),
+
         # 시작 시점부터 모니터 배율에 맞춰 글자를 직접 그린다.
         "--manifest",
         str(root / "assets" / "app.manifest"),
@@ -97,6 +102,11 @@ def main():
         # 양식을 EXE 내부의 assets 폴더에 포함한다.
         "--add-data",
         f"{template}:assets",
+
+        "--add-data",
+        f"{root / 'assets' / 'app.ico'}:assets",
+        "--add-data",
+        f"{root / 'assets' / 'app.png'}:assets",
 
         # 직원 PC에서 별도 설치 없이 사용하는 Pretendard 글꼴과 라이선스.
         "--add-data",

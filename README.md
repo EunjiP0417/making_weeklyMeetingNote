@@ -60,7 +60,7 @@ py build_exe.py
 dist/생방기술국_회의자료_취합.exe
 ```
 
-`build_exe.py`는 내장 양식, 글꼴, 글꼴 라이선스, 고해상도 매니페스트를 사용합니다. 별도의 `테스트 파일` 폴더는 빌드 입력으로 포함하지 않습니다.
+`build_exe.py`는 내장 양식, 글꼴, 글꼴 라이선스, 고해상도 매니페스트와 문서·체크 아이콘을 사용합니다. 프로그램 창·완료 팝업·EXE 아이콘에 같은 디자인을 적용하고 필요한 아이콘 파일을 EXE에 포함하므로 직원에게 별도로 전달할 필요가 없습니다. 별도의 `테스트 파일` 폴더는 빌드 입력으로 포함하지 않습니다.
 
 ## 파일 구성
 
@@ -71,6 +71,9 @@ requirements.txt                검증한 패키지 버전
 AGENTS.md                       코드 수정·문서화·커밋·푸시 규칙
 assets/report_template.hwpx      내장 한글 양식
 assets/app.manifest             Windows 고해상도 설정
+assets/app.ico                  Windows 창·EXE용 다중 해상도 아이콘
+assets/app.png                  완료 팝업 본문 아이콘
+assets/app.svg                  자체 제작 아이콘의 벡터 원본
 assets/fonts/                   Pretendard 글꼴과 라이선스
 docs/CHANGELOG.md                구현 내용과 검증 기록
 tests/test_ui.py                Windows GUI 회귀 검사
