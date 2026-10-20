@@ -1,0 +1,11 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.manifest text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+*.hwp binary
+*.hwpx binary
+*.otf binary
+assets/fonts/OFL.txt -whitespace

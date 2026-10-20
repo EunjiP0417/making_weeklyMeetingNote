@@ -1,0 +1,31 @@
+# Python / local environment
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Build outputs and local backups
+build/
+dist/
+*.spec
+*.exe
+*.bak
+*.log
+*.tmp
+
+# Actual meeting reports and test data
+테스트 파일/
+work/
+*.hwp
+*.hwpx
+!assets/report_template.hwpx
+
+# Editor / operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
