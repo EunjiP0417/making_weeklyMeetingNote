@@ -1014,7 +1014,7 @@ class App(tk.Tk):
         ttk.Label(body, text='01  지난주 최종본', style='Heading.TLabel').pack(anchor='w')
         ttk.Label(body, text='지난 주 계획을 이번 주 실적으로', style='Muted.TLabel').pack(anchor='w', pady=(3, 10))
         ttk.Entry(body, textvariable=self.previous_text, state='readonly', width=28).pack(fill='x')
-        ttk.Button(body, text='최종본 선택', command=self.choose_previous).pack(fill='x', pady=(10, 0))
+        ttk.Button(body, text='추가', command=self.choose_previous).pack(fill='x', pady=(10, 0))
 
         card = Card(left)
         card.grid(row=1, column=0, sticky='nsew', pady=(0, 10))
@@ -1030,7 +1030,7 @@ class App(tk.Tk):
         for label, command in [('추가', self.add), ('삭제', self.remove),
                                ('↑', lambda: self.move(-1)), ('↓', lambda: self.move(1))]:
             ttk.Button(file_buttons, text=label, width=4, command=command).pack(side='left', padx=(0, 5), expand=True, fill='x')
-        self.load_button = ttk.Button(body, text='업무 제목 불러오기', style='Soft.TButton', command=self.load_titles)
+        self.load_button = ttk.Button(body, text='업무 제목 불러오기', style='Primary.TButton', command=self.load_titles)
         self.load_button.pack(fill='x', pady=(10, 0))
 
         card = Card(left)
@@ -1045,8 +1045,8 @@ class App(tk.Tk):
         self.date_entry.bind('<Alt-Down>', lambda e: self.open_calendar())
         self.date_entry.bind('<Escape>', lambda e: self.close_calendar())
         ttk.Label(date_row, textvariable=self.weekday, style='Accent.TLabel').pack(side='left', padx=(8, 0))
+        ttk.Button(body, text='저장 폴더 선택', command=self.choose_output).pack(fill='x', pady=(0, 8))
         ttk.Entry(body, textvariable=self.output, state='readonly', width=28).pack(fill='x')
-        ttk.Button(body, text='저장 폴더 선택', command=self.choose_output).pack(fill='x', pady=(8, 0))
 
         right = ttk.Frame(box, style='Page.TFrame')
         right.grid(row=1, column=1, sticky='nsew')
