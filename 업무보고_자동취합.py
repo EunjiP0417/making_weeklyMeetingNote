@@ -742,28 +742,76 @@ def enable_dpi_awareness():
         user32.SetProcessDPIAware()
 
 
+def display_metrics(widget):
+    """전역 화면 DPI 대신 현재 창이 위치한 모니터의 DPI·작업 영역을 읽는다."""
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [('cbSize', wintypes.DWORD), ('monitor', wintypes.RECT),
+                        ('work', wintypes.RECT), ('flags', wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        hwnd = user32.GetAncestor(widget.winfo_id(), 2) or widget.winfo_id()
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        monitor = user32.MonitorFromWindow(hwnd, 2)
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+        info = MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            try:
+                user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+                user32.GetDpiForWindow.restype = wintypes.UINT
+                dpi = user32.GetDpiForWindow(hwnd)
+            except AttributeError:
+                dpi = round(widget.winfo_fpixels('1i'))
+            outer, client = wintypes.RECT(), wintypes.RECT()
+            user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetWindowRect(hwnd, ctypes.byref(outer))
+            user32.GetClientRect(hwnd, ctypes.byref(client))
+            return {
+                'dpi': dpi or 96, 'monitor': int(monitor), 'hwnd': int(hwnd),
+                'work': (info.work.left, info.work.top, info.work.right, info.work.bottom),
+                'frame': (max(0, outer.right-outer.left-client.right),
+                          max(0, outer.bottom-outer.top-client.bottom)),
+            }
+    return {'dpi': round(widget.winfo_fpixels('1i')), 'monitor': 0, 'hwnd': 0,
+            'work': (0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()), 'frame': (0, 0)}
+
+
 def scale_widget_spacing(parent, scale):
-    """글자는 포인트로 선명하게 그리고, 여백은 현재 화면 배율에 맞춘다."""
-    def scaled(value):
+    """원래 여백을 보존하고 모니터를 오가도 절대 배율로 계산해 누적 확대를 막는다."""
+    def numbers(value):
         parts = parent.tk.splitlist(value) if isinstance(value, str) else value
         if not isinstance(parts, (tuple, list)):
             parts = (parts,)
-        return tuple(round(float(x)*scale) for x in parts)
+        return tuple(float(str(x)) for x in parts)
 
+    if isinstance(parent, ttk.Frame):
+        if not hasattr(parent, '_base_frame_padding'):
+            parent._base_frame_padding = numbers(parent.cget('padding'))
+        if parent._base_frame_padding:
+            parent.configure(padding=tuple(round(v*scale) for v in parent._base_frame_padding))
     for child in parent.winfo_children():
         manager = child.winfo_manager()
         if manager in ('pack', 'grid'):
-            info = child.pack_info() if manager == 'pack' else child.grid_info()
-            padding = {key: scaled(info[key]) for key in ('padx', 'pady', 'ipadx', 'ipady') if key in info}
+            if not hasattr(child, '_base_layout_padding'):
+                info = child.pack_info() if manager == 'pack' else child.grid_info()
+                child._base_layout_padding = {
+                    key: numbers(info[key]) for key in ('padx', 'pady', 'ipadx', 'ipady') if key in info
+                }
+            padding = {key: tuple(round(v*scale) for v in values)
+                       for key, values in child._base_layout_padding.items()}
             if padding:
                 if manager == 'pack':
                     child.pack_configure(**padding)
                 else:
                     child.grid_configure(**padding)
-        if isinstance(child, ttk.Frame):
-            value = child.cget('padding')
-            if value:
-                child.configure(padding=scaled(value))
         scale_widget_spacing(child, scale)
 
 
@@ -780,7 +828,7 @@ class Card(tk.Frame):
         self.bind('<Configure>', self.paint)
 
     def paint(self, event):
-        w, h, r = event.width, event.height, round(18*self.winfo_fpixels('1i')/96)
+        w, h, r = event.width, event.height, round(18*self.winfo_toplevel().ui_scale)
         self.canvas.delete('card')
         self.canvas.create_polygon(
             r, 0, w-r, 0, w, 0, w, r, w, h-r, w, h,
@@ -819,15 +867,37 @@ class DatePicker(tk.Toplevel):
         scale_widget_spacing(body, self.ui_scale)
         self.render()
         self.update_idletasks()
-        anchor = owner.date_entry
-        x = min(anchor.winfo_rootx(), self.winfo_screenwidth()-self.winfo_reqwidth()-16)
-        y = anchor.winfo_rooty()+anchor.winfo_height()+6
-        if y+self.winfo_reqheight() > self.winfo_screenheight()-50:
-            y = anchor.winfo_rooty()-self.winfo_reqheight()-6
-        self.geometry(f'+{max(0, x)}+{max(0, y)}')
         self.deiconify()
+        self.place_near_entry(owner)
         # 날짜 입력칸은 달력이 열린 동안에도 직접 입력할 수 있다.
         owner.date_entry.after_idle(owner.date_entry.focus_set)
+
+    def place_near_entry(self, owner):
+        anchor = owner.date_entry
+        work = display_metrics(owner)['work']
+        left, top, right, bottom = work
+        gap = round(6*owner.ui_scale)
+        for _ in range(2):
+            self.update_idletasks()
+            info = display_metrics(self)
+            width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+            outer_width, outer_height = width+info['frame'][0], height+info['frame'][1]
+            x = max(left, min(anchor.winfo_rootx(), right-outer_width))
+            y = anchor.winfo_rooty()+anchor.winfo_height()+gap
+            if y+outer_height > bottom:
+                y = anchor.winfo_rooty()-outer_height-gap
+            y = max(top, min(y, bottom-outer_height))
+            if sys.platform == 'win32' and info['hwnd']:
+                import ctypes
+                from ctypes import wintypes
+                user32 = ctypes.windll.user32
+                user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                               ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+                user32.SetWindowPos(info['hwnd'], 0, x, y, outer_width, outer_height, 0x0014)
+            else:
+                self.geometry(f'{width}x{height}+{max(0, x)}+{max(0, y)}')
+        self.update_idletasks()
+
 
     def change_month(self, delta):
         total = (self.year-1)*12+self.month-1+delta
@@ -843,10 +913,10 @@ class DatePicker(tk.Toplevel):
         for widget in self.grid_days.winfo_children():
             widget.destroy()
         self.days.clear()
-        for col, label in enumerate('월화수목금토일'):
+        for col, label in enumerate('일월화수목금토'):
             color = '#525252'
             ttk.Label(self.grid_days, text=label, anchor='center', foreground=color).grid(row=0, column=col, pady=(0, round(6*self.ui_scale)))
-        for row, week in enumerate(calendar.Calendar(firstweekday=0).monthdayscalendar(self.year, self.month), 1):
+        for row, week in enumerate(calendar.Calendar(firstweekday=calendar.SUNDAY).monthdayscalendar(self.year, self.month), 1):
             for col, day in enumerate(week):
                 if not day:
                     continue
@@ -866,14 +936,25 @@ class App(tk.Tk):
     def __init__(self):
         enable_dpi_awareness()
         super().__init__()
-        self.ui_scale = max(1.0, self.winfo_fpixels('1i')/96)
+        self.withdraw()
+        display = display_metrics(self)
+        self._display_dpi = display['dpi']
+        self._display_monitor = display['monitor']
+        self._display_work = display['work']
+        self._display_fit_pending = True
+        self._display_fit_passes = 1
+        self._display_state = 'normal'
+        self.ui_scale = display['dpi']/96
+        self.tk.call('tk', 'scaling', display['dpi']/72)
         self.title('주간 회의자료 취합')
         self.configure(bg='#f2f2f2')
         self.setup_theme()
-        width = min(round(1180*self.ui_scale), self.winfo_screenwidth()-round(80*self.ui_scale))
-        height = min(round(850*self.ui_scale), self.winfo_screenheight()-round(100*self.ui_scale))
+        max_width, max_height = self.display_limits(display)
+        width = min(round(1180*self.ui_scale), max_width)
+        height = min(round(850*self.ui_scale), max_height)
+        self._normal_size_dip = (width/self.ui_scale, height/self.ui_scale)
         self.geometry(f'{width}x{height}')
-        self.minsize(min(round(930*self.ui_scale), width), min(round(720*self.ui_scale), height))
+        self.minsize(min(round(930*self.ui_scale), max_width), min(round(720*self.ui_scale), max_height))
         self.paths = []
         self.previous_path = None
         self.loaded_previous = None
@@ -893,6 +974,7 @@ class App(tk.Tk):
         self.preview_state = tk.StringVar(value='파일 선택 후 업무 제목을 불러오세요.')
 
         box = ttk.Frame(self, style='Page.TFrame', padding=20)
+        self.content_box = box
         box.pack(fill='both', expand=True)
         box.columnconfigure(0, weight=0, minsize=round(326*self.ui_scale))
         box.columnconfigure(1, weight=1)
@@ -908,9 +990,6 @@ class App(tk.Tk):
         left_shell.columnconfigure(0, weight=1)
         self.left_canvas = tk.Canvas(left_shell, width=round(326*self.ui_scale), height=1, bg='#f2f2f2', bd=0, highlightthickness=0)
         self.left_canvas.grid(row=0, column=0, sticky='nsew')
-        left_scroll = ttk.Scrollbar(left_shell, orient='vertical', command=self.left_canvas.yview)
-        left_scroll.grid(row=0, column=1, sticky='ns')
-        self.left_canvas.config(yscrollcommand=left_scroll.set)
         left = ttk.Frame(self.left_canvas, style='Page.TFrame')
         left_window = self.left_canvas.create_window((0, 0), window=left, anchor='nw')
         def resize_left(event=None):
@@ -965,8 +1044,6 @@ class App(tk.Tk):
         self.date_entry.bind('<Button-1>', lambda e: self.open_calendar())
         self.date_entry.bind('<Alt-Down>', lambda e: self.open_calendar())
         self.date_entry.bind('<Escape>', lambda e: self.close_calendar())
-        self.calendar_button = ttk.Button(date_row, text='달력', width=4, command=self.open_calendar)
-        self.calendar_button.pack(side='left', padx=(5, 0))
         ttk.Label(date_row, textvariable=self.weekday, style='Accent.TLabel').pack(side='left', padx=(8, 0))
         ttk.Label(body, text='직접 입력하거나 달력에서 선택하세요', style='Muted.TLabel').pack(anchor='w', pady=(0, 10))
         ttk.Entry(body, textvariable=self.output, state='readonly', width=28).pack(fill='x')
@@ -994,8 +1071,7 @@ class App(tk.Tk):
             ttk.Label(panel, textvariable=count, style='Muted.TLabel').pack(anchor='w', pady=(0, 8))
             row_items = ttk.Frame(panel)
             row_items.pack(fill='both', expand=True)
-            listing = self.make_list(row_items, height=8)
-            listing.config(width=30)
+            listing = self.make_work_list(row_items)
             listing.bind('<ButtonPress-1>', lambda e, k=kind: self.drag_begin(k, e))
             listing.bind('<B1-Motion>', lambda e, k=kind: self.drag_motion(k, e))
             listing.bind('<ButtonRelease-1>', lambda e, k=kind: self.drag_end(k, e))
@@ -1025,37 +1101,52 @@ class App(tk.Tk):
         self.bind('<Button-1>', self.dismiss_calendar, add='+')
         self.after(100, self.poll)
         self.protocol('WM_DELETE_WINDOW', self.close)
+        self.deiconify()
+        self._display_job = self.after(0, self.watch_display)
 
     def setup_theme(self):
         # 글꼴은 이 프로세스에서만 사용하며 직원 PC의 시스템 글꼴을 바꾸지 않는다.
-        if sys.platform == 'win32':
+        if sys.platform == 'win32' and not getattr(self, '_ui_fonts_registered', False):
             import ctypes
             for path in (Path(__file__).resolve().parent/'assets'/'fonts').glob('*.otf'):
                 ctypes.windll.gdi32.AddFontResourceExW(str(path), 0x10, 0)
+            self._ui_fonts_registered = True
         families = set(tkfont.families(self))
         heading_family = 'Pretendard' if 'Pretendard' in families else '맑은 고딕'
         self.body_family = 'Pretendard Medium' if 'Pretendard Medium' in families else heading_family
-        self.body_font = (self.body_family, 10)
+        if not hasattr(self, 'ui_fonts'):
+            self.ui_fonts = {}
+        specs = {'body': (self.body_family, 10, 'normal'), 'title': (heading_family, 21, 'bold'),
+                 'heading': (heading_family, 12, 'bold'), 'small_bold': (heading_family, 10, 'bold'),
+                 'action': (heading_family, 11, 'bold')}
+        for name, (family, size, weight) in specs.items():
+            if name not in self.ui_fonts:
+                self.ui_fonts[name] = tkfont.Font(root=self, name='Weekly_'+name, family=family, size=size, weight=weight)
+            else:
+                # tk scaling만 바꾸면 기존 익명 글꼴은 갱신되지 않아 이름 있는 글꼴을 재설정한다.
+                self.ui_fonts[name].configure(family=family, size=size, weight=weight)
+        self.body_font = self.ui_fonts['body']
         for name in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkCaptionFont'):
             tkfont.nametofont(name).configure(family=self.body_family, size=10)
         tkfont.nametofont('TkHeadingFont').configure(family=heading_family, size=10, weight='bold')
         p = lambda *values: tuple(round(v*self.ui_scale) for v in values)
         style = ttk.Style(self)
-        style.theme_use('clam')
+        if style.theme_use() != 'clam':
+            style.theme_use('clam')
         style.configure('.', font=self.body_font, background='white', foreground='#171717')
         style.configure('Page.TFrame', background='#f2f2f2')
         style.configure('Card.TFrame', background='white')
-        style.configure('Title.TLabel', background='#f2f2f2', foreground='#111111', font=(heading_family, 21, 'bold'))
-        style.configure('Heading.TLabel', foreground='#171717', font=(heading_family, 12, 'bold'))
+        style.configure('Title.TLabel', background='#f2f2f2', foreground='#111111', font=self.ui_fonts['title'])
+        style.configure('Heading.TLabel', foreground='#171717', font=self.ui_fonts['heading'])
         style.configure('Muted.TLabel', foreground='#525252')
         # 상태 설명은 검정/회색으로 읽기 쉽게 표시하고 블루는 선택·포커스에 사용.
         style.configure('Accent.TLabel', foreground='#333333')
-        style.configure('Badge.TLabel', foreground='#171717', background='#e8e8e8', font=(heading_family, 10, 'bold'))
+        style.configure('Badge.TLabel', foreground='#171717', background='#e8e8e8', font=self.ui_fonts['small_bold'])
         style.configure('TButton', padding=p(12, 7), background='#eeeeee', foreground='#171717', borderwidth=0, relief='flat')
         style.map('TButton', background=[('disabled', '#eeeeee'), ('pressed', '#d9d9d9'), ('active', '#e2e2e2')], foreground=[('disabled', '#808080')])
         style.configure('Soft.TButton', background='#e8e8e8', foreground='#171717')
         # 주요 실행 버튼은 블랙 바탕·화이트 글씨로 뚜렷하게 강조한다.
-        style.configure('Primary.TButton', padding=p(16, 13), background='#171717', foreground='white', font=(heading_family, 11, 'bold'))
+        style.configure('Primary.TButton', padding=p(16, 13), background='#171717', foreground='white', font=self.ui_fonts['action'])
         style.map('Primary.TButton', background=[('disabled', '#dddddd'), ('pressed', '#333333'), ('active', '#262626'), ('!disabled', '#171717')], foreground=[('disabled', '#737373'), ('!disabled', 'white')])
         style.configure('TEntry', padding=p(7), foreground='#171717', fieldbackground='#f7f7f7', bordercolor='#d9d9d9', lightcolor='#d9d9d9', darkcolor='#d9d9d9')
         style.map('TEntry', fieldbackground=[('readonly', '#f7f7f7')], bordercolor=[('focus', '#737373')])
@@ -1067,11 +1158,99 @@ class App(tk.Tk):
         style.configure('Day.TButton', padding=p(5, 7), background='white')
         style.configure('SelectedDay.TButton', padding=p(5, 7), background=ACCENT_BLUE, foreground='#111111')
         style.map('SelectedDay.TButton', background=[('!disabled', ACCENT_BLUE)], foreground=[('!disabled', '#111111')])
+        style.configure('Work.Treeview', font=self.body_font, rowheight=round(28*self.ui_scale),
+                        background='white', fieldbackground='white', foreground='#171717',
+                        borderwidth=1, bordercolor='#d9d9d9', lightcolor='#d9d9d9', darkcolor='#d9d9d9')
+        style.map('Work.Treeview', background=[('selected', ACCENT_BLUE)], foreground=[('selected', '#111111')])
+        style.configure('Work.Treeview.Heading', font=self.ui_fonts['small_bold'],
+                        background='#eeeeee', foreground='#171717', padding=p(8, 7), relief='flat')
+        style.map('Work.Treeview.Heading', background=[('active', '#e2e2e2'), ('pressed', '#d9d9d9')])
         self.option_add('*Listbox.font', self.body_font)
         self.option_add('*Listbox.background', '#ffffff')
         self.option_add('*Listbox.foreground', '#171717')
         self.option_add('*Listbox.selectBackground', ACCENT_BLUE)
         self.option_add('*Listbox.selectForeground', '#111111')
+
+
+    def display_limits(self, info):
+        left, top, right, bottom = info['work']
+        margin = round(16*self.ui_scale)
+        return (max(1, right-left-info['frame'][0]-2*margin),
+                max(1, bottom-top-info['frame'][1]-2*margin))
+
+    def fit_window_to_display(self, info):
+        """일반 창을 현재 모니터 작업 영역 안에 맞추고 최대화 상태는 유지한다."""
+        max_width, max_height = self.display_limits(info)
+        self.minsize(min(round(930*self.ui_scale), max_width), min(round(720*self.ui_scale), max_height))
+        if self.state() != 'normal':
+            return
+        width = min(round(self._normal_size_dip[0]*self.ui_scale), max_width)
+        height = min(round(self._normal_size_dip[1]*self.ui_scale), max_height)
+        if sys.platform == 'win32' and info['hwnd']:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            rect, client = wintypes.RECT(), wintypes.RECT()
+            user32.GetWindowRect(info['hwnd'], ctypes.byref(rect))
+            user32.GetClientRect(info['hwnd'], ctypes.byref(client))
+            # Tk 8.6의 서로 다른 DPI 간 테두리 보정 오차를 피하고 실제 클라이언트 크기를 맞춘다.
+            outer_width = width+max(0, rect.right-rect.left-client.right)
+            outer_height = height+max(0, rect.bottom-rect.top-client.bottom)
+            left, top, right, bottom = info['work']
+            x = max(left, min(rect.left, right-outer_width))
+            y = max(top, min(rect.top, bottom-outer_height))
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.SetWindowPos(info['hwnd'], 0, x, y, outer_width, outer_height, 0x0014)
+        else:
+            self.geometry(f'{width}x{height}')
+        self.update_idletasks()
+
+    def apply_display_scale(self, info):
+        old_scale = self.ui_scale
+        filename_widths = {kind: view.column('filename', 'width')/old_scale
+                           for kind, view in self.item_lists.items()}
+        self.close_calendar()
+        self._display_dpi = info['dpi']
+        self.ui_scale = info['dpi']/96
+        self.tk.call('tk', 'scaling', info['dpi']/72)
+        self.setup_theme()
+        scale_widget_spacing(self.content_box, self.ui_scale)
+        self.content_box.columnconfigure(0, minsize=round(326*self.ui_scale))
+        self.left_canvas.configure(width=round(326*self.ui_scale))
+        for kind, view in self.item_lists.items():
+            view.column('title', minwidth=round(200*self.ui_scale))
+            view.column('filename', width=round(filename_widths[kind]*self.ui_scale),
+                        minwidth=round(120*self.ui_scale))
+        self.update_idletasks()
+
+    def watch_display(self):
+        state = self.state()
+        if state not in ('iconic', 'withdrawn'):
+            if state == 'normal' and self._display_state != 'normal':
+                self._display_fit_pending = True
+                self._display_fit_passes = 3
+            info = display_metrics(self)
+            if info['dpi'] != self._display_dpi:
+                self.apply_display_scale(info)
+                self._display_fit_pending = True
+                self._display_fit_passes = 3
+            if info['monitor'] != self._display_monitor or info['work'] != self._display_work:
+                self._display_fit_pending = True
+                self._display_fit_passes = 3
+            self._display_monitor, self._display_work = info['monitor'], info['work']
+            moving = False
+            if sys.platform == 'win32':
+                import ctypes
+                moving = bool(ctypes.windll.user32.GetAsyncKeyState(1) & 0x8000)
+            if self._display_fit_pending and not moving:
+                self.fit_window_to_display(info)
+                self._display_fit_passes -= 1
+                self._display_fit_pending = self._display_fit_passes > 0
+            if not self._display_fit_pending and self.state() == 'normal':
+                self._normal_size_dip = (self.winfo_width()/self.ui_scale, self.winfo_height()/self.ui_scale)
+        self._display_state = state
+        self._display_job = self.after(200, self.watch_display)
 
 
     def make_list(self, parent, height):
@@ -1087,6 +1266,40 @@ class App(tk.Tk):
         vertical.grid(row=0, column=1, sticky='ns')
         horizontal.grid(row=1, column=0, sticky='ew')
         return listing
+
+    def make_work_list(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        listing = ttk.Treeview(parent, columns=('title', 'filename'), show='headings',
+                              selectmode='browse', height=8, style='Work.Treeview')
+        listing.heading('title', text='업무 제목', anchor='w')
+        listing.heading('filename', text='파일명', anchor='w')
+        listing.column('title', width=round(440*self.ui_scale), minwidth=round(200*self.ui_scale), stretch=True)
+        listing.column('filename', width=round(240*self.ui_scale), minwidth=round(120*self.ui_scale), stretch=False)
+        vertical = ttk.Scrollbar(parent, orient='vertical', command=listing.yview)
+        horizontal = ttk.Scrollbar(parent, orient='horizontal', command=listing.xview)
+        listing.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        listing.grid(row=0, column=0, sticky='nsew')
+        vertical.grid(row=0, column=1, sticky='ns')
+        horizontal.grid(row=1, column=0, sticky='ew')
+        return listing
+
+    def work_row_at(self, listing, event):
+        """표 제목/열 경계는 제외하고 업무 행 또는 마지막 행 아래의 빈 공간을 찾는다."""
+        if not (0 <= event.x < listing.winfo_width() and 0 <= event.y < listing.winfo_height()):
+            return None
+        row = listing.identify_row(event.y)
+        if row:
+            return row
+        if listing.identify_region(event.x, event.y) in ('heading', 'separator'):
+            return None
+        rows = listing.get_children()
+        if rows:
+            last = listing.bbox(rows[-1])
+            if last and event.y >= last[1]+last[3]:
+                return rows[-1]
+        return None
+
 
     def open_calendar(self):
         if self.busy:
@@ -1110,7 +1323,7 @@ class App(tk.Tk):
         self.calendar_popup = None
 
     def dismiss_calendar(self, event):
-        if event.widget not in (self.date_entry, self.calendar_button):
+        if event.widget is not self.date_entry:
             self.close_calendar()
 
 
@@ -1194,50 +1407,71 @@ class App(tk.Tk):
     def refresh_items(self, kind, selected=None):
         listing = self.item_lists[kind]
         self.item_counts[kind].set(f'{len(self.items[kind])}개 업무')
-        listing.delete(0, 'end')
+        rows = listing.get_children()
+        if rows:
+            listing.delete(*rows)
         for n, item in enumerate(self.items[kind], 1):
-            listing.insert('end', f'{n}. {item.title}    [{item.source.name}]')
-        if selected is not None and self.items[kind]:
-            listing.selection_set(selected)
-            listing.see(selected)
+            listing.insert('', 'end', iid=item.key, values=(f'{n}. {item.title}', item.source.name))
+        if selected is not None and 0 <= selected < len(self.items[kind]):
+            row = self.items[kind][selected].key
+            listing.selection_set(row)
+            listing.focus(row)
+            listing.see(row)
 
     def drag_begin(self, kind, event):
-        if not self.busy and self.items[kind]:
-            self.drag_start[kind] = self.item_lists[kind].nearest(event.y)
+        self.drag_start.pop(kind, None)
+        listing = self.item_lists[kind]
+        if self.busy or not self.items[kind] or listing.identify_region(event.x, event.y) != 'cell':
+            return
+        row = listing.identify_row(event.y)
+        if row:
+            self.drag_start[kind] = row
+            listing.selection_set(row)
+            listing.focus(row)
 
     def drag_motion(self, kind, event):
         if self.busy or kind not in self.drag_start:
             return
         listing = self.item_lists[kind]
-        if event.y < 10:
+        if event.y < round(30*self.ui_scale):
             listing.yview_scroll(-1, 'units')
-        elif event.y > listing.winfo_height() - 10:
+        elif event.y > listing.winfo_height()-round(12*self.ui_scale):
             listing.yview_scroll(1, 'units')
-        target = listing.nearest(event.y)
-        listing.selection_clear(0, 'end')
-        listing.selection_set(target)
-        listing.activate(target)
+        target = self.work_row_at(listing, event)
+        if target:
+            listing.selection_set(target)
+            listing.focus(target)
+        return 'break'
 
     def drag_end(self, kind, event):
         source = self.drag_start.pop(kind, None)
         if self.busy or source is None:
             return
         listing = self.item_lists[kind]
-        if not (0 <= event.x < listing.winfo_width() and 0 <= event.y < listing.winfo_height()):
-            self.refresh_items(kind, source)
+        rows = listing.get_children()
+        if source not in rows:
             return
-        target = listing.nearest(event.y)
-        reorder(self.items[kind], source, target)
-        self.refresh_items(kind, target)
+        target = self.work_row_at(listing, event)
+        if target is None:
+            self.refresh_items(kind, rows.index(source))
+            return 'break'
+        target_index = rows.index(target)
+        reorder(self.items[kind], rows.index(source), target_index)
+        self.refresh_items(kind, target_index)
+        return 'break'
 
     def move_item(self, kind, delta):
-        if self.busy or not self.item_lists[kind].curselection():
-            return
-        source = self.item_lists[kind].curselection()[0]
-        target = source + delta
+        listing = self.item_lists[kind]
+        selected = listing.selection()
+        if self.busy or not selected:
+            return 'break'
+        source = listing.index(selected[0])
+        target = source+delta
         if 0 <= target < len(self.items[kind]):
             reorder(self.items[kind], source, target)
             self.refresh_items(kind, target)
+        return 'break'
+
 
     def load_titles(self):
         self.close_calendar()
