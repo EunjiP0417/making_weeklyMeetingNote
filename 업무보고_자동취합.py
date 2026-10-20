@@ -970,6 +970,9 @@ class App(tk.Tk):
         self.date = tk.StringVar(value=dt.date.today().strftime('%Y.%m.%d.'))
         self.weekday = tk.StringVar(value=weekday_name(self.date.get())+'요일')
         self.output = tk.StringVar()
+        self.output_text = tk.StringVar(value='저장 폴더를 선택하세요')
+        self.output.trace_add('write', lambda *_: self.output_text.set(
+            self.output.get() or '저장 폴더를 선택하세요'))
         self.previous_text = tk.StringVar(value='선택된 파일이 없습니다')
         self.preview_state = tk.StringVar(value='파일 선택 후 업무 제목을 불러오세요.')
 
@@ -1030,7 +1033,7 @@ class App(tk.Tk):
         for label, command in [('추가', self.add), ('삭제', self.remove),
                                ('↑', lambda: self.move(-1)), ('↓', lambda: self.move(1))]:
             ttk.Button(file_buttons, text=label, width=4, command=command).pack(side='left', padx=(0, 5), expand=True, fill='x')
-        self.load_button = ttk.Button(body, text='업무 제목 불러오기', style='Primary.TButton', command=self.load_titles)
+        self.load_button = ttk.Button(body, text='업무 제목 불러오기', style='Load.Primary.TButton', command=self.load_titles)
         self.load_button.pack(fill='x', pady=(10, 0))
 
         card = Card(left)
@@ -1046,7 +1049,7 @@ class App(tk.Tk):
         self.date_entry.bind('<Escape>', lambda e: self.close_calendar())
         ttk.Label(date_row, textvariable=self.weekday, style='Accent.TLabel').pack(side='left', padx=(8, 0))
         ttk.Button(body, text='저장 폴더 선택', command=self.choose_output).pack(fill='x', pady=(0, 8))
-        ttk.Entry(body, textvariable=self.output, state='readonly', width=28).pack(fill='x')
+        ttk.Entry(body, textvariable=self.output_text, state='readonly', width=28).pack(fill='x')
 
         right = ttk.Frame(box, style='Page.TFrame')
         right.grid(row=1, column=1, sticky='nsew')
@@ -1147,6 +1150,8 @@ class App(tk.Tk):
         # 주요 실행 버튼은 블랙 바탕·화이트 글씨로 뚜렷하게 강조한다.
         style.configure('Primary.TButton', padding=p(16, 13), background='#171717', foreground='white', font=self.ui_fonts['action'])
         style.map('Primary.TButton', background=[('disabled', '#dddddd'), ('pressed', '#333333'), ('active', '#262626'), ('!disabled', '#171717')], foreground=[('disabled', '#737373'), ('!disabled', 'white')])
+        # 불러오기는 검정 강조를 유지하되 추가·삭제와 같은 글꼴과 높이를 사용한다.
+        style.configure('Load.Primary.TButton', padding=p(12, 7), font=self.body_font)
         style.configure('TEntry', padding=p(7), foreground='#171717', fieldbackground='#f7f7f7', bordercolor='#d9d9d9', lightcolor='#d9d9d9', darkcolor='#d9d9d9')
         style.map('TEntry', fieldbackground=[('readonly', '#f7f7f7')], bordercolor=[('focus', '#737373')])
         style.configure('TNotebook', background='white', borderwidth=0, bordercolor='white', lightcolor='white', darkcolor='white', tabmargins=(0, 0, 0, 0))
