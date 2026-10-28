@@ -5,7 +5,9 @@ import datetime as dt
 import importlib.util
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows GUI에서 실행하는 검사입니다.')
@@ -32,6 +34,8 @@ class ReportUiTests(unittest.TestCase):
     def setUp(self):
         self.errors.clear()
         self.app.busy = False
+        self.app.select_department('생방기술2')
+        self.app.set_busy(False)
         self.app.drag_start.clear()
         self.app.close_calendar()
         for kind in self.module.KINDS:
@@ -74,6 +78,113 @@ class ReportUiTests(unittest.TestCase):
                 self.assertEqual(listing.heading('filename', 'text'), '파일명')
                 for n, row in enumerate(listing.get_children()):
                     self.assertEqual(listing.item(row, 'values'), (f'{n+1}. 업무 제목 {n}', f'원본자료_{n}.hwp'))
+
+    def test_department_buttons_order_highlight_invalidation_and_busy_guard(self):
+        buttons = self.app.department_buttons
+        self.assertEqual(list(buttons), ['생방기술1', '생방기술2', '생방1+생방2'])
+        self.assertLess(buttons['생방기술1'].winfo_x(), buttons['생방기술2'].winfo_x())
+        self.assertEqual(buttons['생방기술1'].winfo_width(), buttons['생방기술2'].winfo_width())
+        self.assertTrue(buttons['생방기술2'].instate(['selected']))
+        style = self.module.ttk.Style(self.app)
+        self.assertEqual(style.lookup('Department.TButton', 'background', ('selected',)), '#171717')
+        self.assertEqual(style.lookup('Department.TButton', 'foreground', ('selected',)), 'white')
+        self.app.loaded_department = '생방기술2'
+        buttons['생방기술1'].invoke()
+        self.assertEqual(self.app.department, '생방기술1')
+        self.assertTrue(buttons['생방기술1'].instate(['selected']))
+        self.assertTrue(buttons['생방기술2'].instate(['!selected']))
+        self.assertIsNone(self.app.loaded_department)
+        self.assertTrue(all(not rows for rows in self.app.items.values()))
+        self.app.set_busy(True)
+        self.assertTrue(all(b.instate(['disabled']) for b in buttons.values()))
+        buttons['생방기술2'].invoke()
+        self.app.select_department('생방기술2')
+        self.assertEqual(self.app.department, '생방기술1')
+        self.app.set_busy(False)
+        self.assertTrue(all(b.instate(['!disabled']) for b in buttons.values()))
+        self.assertTrue(buttons['생방기술1'].instate(['selected']))
+
+    def test_boundary_dialog_prompts_titles_confirmation_and_cancellation(self):
+        for department, prompt in (
+                ('생방기술1', '생방기술1의 마지막 추진실적을 선택하시오.'),
+                ('생방기술2', '생방기술2의 첫 번째 추진실적을 선택하시오.')):
+            with self.subTest(department=department):
+                titles = ['같은 제목', '긴 업무 제목 '*12, '같은 제목']
+                dialog = self.module.BoundaryDialog(self.app, department, titles)
+                self.app.update()
+                self.assertEqual(dialog.prompt.cget('text'), prompt)
+                self.assertEqual(list(dialog.listbox.get(0, 'end')), titles)
+                self.assertEqual(dialog.listbox.curselection(), ())
+                self.assertTrue(dialog.confirm_button.instate(['disabled']))
+                dialog.confirm()
+                self.assertTrue(dialog.winfo_exists())
+                dialog.listbox.selection_set(2)
+                dialog.listbox.event_generate('<<ListboxSelect>>')
+                self.assertTrue(dialog.confirm_button.instate(['!disabled']))
+                dialog.confirm_button.invoke()
+                self.assertEqual(dialog.result, 2)
+                self.assertFalse(dialog.winfo_exists())
+                dialog = self.module.BoundaryDialog(self.app, department, titles)
+                dialog.destroy()
+                self.assertIsNone(dialog.result)
+
+    def test_background_load_boundary_response_and_cancel_restore_buttons(self):
+        self.app.cache_dir = None
+        for department, cancel in ((d, c) for d in self.module.DEPARTMENTS for c in (False, True)):
+            with self.subTest(department=department, cancel=cancel), tempfile.TemporaryDirectory() as folder:
+                self.app.select_department(department)
+                previous = Path(folder)/'previous.hwpx'
+                previous.touch()
+                self.app.previous_path = previous
+                self.app.paths = [Path(folder)/'current.hwpx']
+                original_items = {k: list(v) for k, v in self.app.items.items()}
+                if not all(original_items.values()):
+                    original_items = {k: [self.module.WorkItem(k, k, '업무', previous,
+                        previous, 1, 2)] for k in self.module.KINDS}
+                calls = []
+
+                def fake_prepare(paths, cache, log, previous_path, department, select_boundary):
+                    calls.append((paths, previous_path, department))
+                    chosen = select_boundary(department, ['첫 업무', '경계 업무', '끝 업무'])
+                    if chosen is None:
+                        raise self.module.LoadCancelled()
+                    self.assertEqual(chosen, 1)
+                    return original_items
+
+                def answer_dialog():
+                    for child in self.app.winfo_children():
+                        if isinstance(child, self.module.BoundaryDialog):
+                            if cancel:
+                                child.destroy()
+                            else:
+                                child.listbox.selection_set(1)
+                                child.confirm()
+                            return
+                    self.app.after(10, answer_dialog)
+
+                with patch.object(self.module, 'prepare', side_effect=fake_prepare):
+                    self.app.after(10, answer_dialog)
+                    self.app.load_titles()
+                    self.assertTrue(self.app.busy)
+                    deadline = time.monotonic()+5
+                    while self.app.busy and time.monotonic() < deadline:
+                        self.app.update()
+                        time.sleep(.01)
+                    self.assertFalse(self.app.busy)
+                self.assertEqual(calls, [(self.app.paths, previous, self.app.department)])
+                self.assertTrue(all(b.instate(['!disabled']) for b in self.app.department_buttons.values()))
+                if cancel:
+                    self.assertIn('취소', self.app.preview_state.get())
+                    self.assertIsNone(self.app.loaded_department)
+                    self.assertTrue(all(not items for items in self.app.items.values()))
+                else:
+                    self.assertEqual(self.app.loaded_department, self.app.department)
+                    self.assertEqual(self.app.items, original_items)
+                if self.app.cache_dir is not None:
+                    self.app.cache_dir.cleanup()
+                    self.app.cache_dir = None
+        self.app.paths = []
+        self.app.previous_path = None
 
     def test_move_and_keyboard_shortcuts_in_both_tabs(self):
         for kind in self.module.KINDS:
@@ -153,7 +264,7 @@ class ReportUiTests(unittest.TestCase):
 
     def test_leap_date_manual_typing_weekday_and_filename(self):
         self.app.date.set('2028.02.01.')
-        self.app.output.set(str(Path(tempfile.gettempdir())/'생방기술국_회의자료_280201.hwp'))
+        self.app.output.set(str(Path(tempfile.gettempdir())/'생방기술2_회의자료_280201.hwp'))
         self.app.open_calendar()
         picker = self.app.calendar_popup
         self.assertIn(29, picker.days)
@@ -163,7 +274,73 @@ class ReportUiTests(unittest.TestCase):
         self.app.update()
         self.assertEqual(self.app.date.get(), '2028.02.29.')
         self.assertEqual(self.app.weekday.get(), '화요일')
-        self.assertTrue(self.app.output.get().endswith('생방기술국_회의자료_280229.hwp'))
+        self.assertTrue(self.app.output.get().endswith('생방기술2_회의자료_280229.hwp'))
+
+    def test_final_mode_is_separate_page_and_filenames_follow_mode_and_date(self):
+        self.app.output.set(str(Path(tempfile.gettempdir())/'old.hwp'))
+        for mode, department in (('생방기술1', '생방기술1'), ('생방기술2', '생방기술2'),
+                                 (self.module.COMBINED_MODE, '생방기술국'), ('생방기술1', '생방기술1')):
+            with self.subTest(mode=mode):
+                self.app.select_department(mode)
+                self.app.update()
+                self.assertEqual(self.app.final_inputs.winfo_ismapped(), mode == self.module.COMBINED_MODE)
+                self.assertEqual(self.app.department_inputs.winfo_ismapped(), mode != self.module.COMBINED_MODE)
+                self.assertTrue(self.app.output.get().endswith(f'{department}_회의자료_261101.hwp'))
+                self.assertIsNone(self.app.loaded_department)
+                self.assertTrue(all(b.instate(['disabled']) == (mode == self.module.COMBINED_MODE)
+                                    for b in self.app.order_buttons))
+
+    def test_final_mode_rejects_missing_duplicate_files_and_keeps_department_order(self):
+        self.app.select_department(self.module.COMBINED_MODE)
+        self.app.final_paths = {d: None for d in self.module.DEPARTMENTS}
+        with patch.object(self.module.messagebox, 'showerror') as error:
+            self.app.load_titles()
+            error.assert_called_once()
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder)/f'department_{n}.hwpx' for n in (1, 2)]
+            for path in paths:
+                path.touch()
+            self.app.final_paths = dict(zip(self.module.DEPARTMENTS, [paths[0], paths[0]]))
+            with patch.object(self.module.messagebox, 'showerror') as error:
+                self.app.load_titles()
+                error.assert_called_once()
+            self.app.final_paths = dict(zip(self.module.DEPARTMENTS, paths))
+            expected = {k: [self.module.WorkItem(f'{k}_{n}', k, f'생방{n} 업무', paths[n-1],
+                        paths[n-1], 0, 1) for n in (1, 2)] for k in self.module.KINDS}
+            with patch.object(self.module, 'prepare_final', return_value=expected) as prepare_final, \
+                    patch.object(self.module, 'prepare', side_effect=AssertionError('최종 모드에서 이월 금지')):
+                self.app.load_titles()
+                deadline = time.monotonic()+5
+                while self.app.busy and time.monotonic() < deadline:
+                    self.app.update()
+                    time.sleep(.01)
+                self.assertFalse(self.app.busy)
+                self.assertEqual(prepare_final.call_args.args[0], paths)
+            self.assertEqual(self.app.items, expected)
+            self.assertEqual(self.app.loaded_paths, paths)
+            for kind in self.module.KINDS:
+                listing = self.view(kind)
+                self.app.refresh_items(kind, 0)
+                self.app.move_item(kind, 1)
+                self.app.drag_begin(kind, self.pointer(listing, 0))
+                self.assertEqual(self.app.items[kind], expected[kind])
+                self.assertNotIn(kind, self.app.drag_start)
+            self.app.output.set(str(Path(folder)/'placeholder.hwp'))
+            with patch.object(self.module, 'merge') as merge, \
+                    patch.object(self.module, 'CompletionDialog', return_value=None):
+                self.app.start()
+                deadline = time.monotonic()+5
+                while self.app.busy and time.monotonic() < deadline:
+                    self.app.update()
+                    time.sleep(.01)
+                self.assertFalse(self.app.busy)
+                merge.assert_called_once()
+                self.assertEqual(merge.call_args.args[0], expected)
+                self.assertEqual(merge.call_args.args[1].name, '생방기술국_회의자료_261101.hwp')
+                self.assertEqual(merge.call_args.kwargs['department'], '생방기술국')
+            self.app.cache_dir.cleanup()
+            self.app.cache_dir = None
+        self.app.final_paths = {d: None for d in self.module.DEPARTMENTS}
         self.app.date_entry.delete(0, 'end')
         self.app.date_entry.insert(0, '2026-12-31')
         self.assertEqual(self.app.weekday.get(), '목요일')

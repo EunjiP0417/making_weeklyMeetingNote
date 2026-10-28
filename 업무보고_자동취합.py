@@ -21,6 +21,10 @@ from lxml import etree as E
 HP = 'http://www.hancom.co.kr/hwpml/2011/paragraph'
 NS = {'hp': HP}
 KINDS = ('추진실적', '추진계획')
+DEPARTMENTS = ('생방기술1', '생방기술2')
+COMBINED_MODE = '생방1+생방2'
+MODES = (*DEPARTMENTS, COMBINED_MODE)
+REPORT_DEPARTMENTS = (*DEPARTMENTS, '생방기술국')
 # 기본 화면과 주요 강조는 무채색, 보조 선택 표시만 차분한 파스텔 블루.
 ACCENT_BLUE = '#dce6f0'
 TEMPLATE_PATH = Path(__file__).resolve().parent / 'assets' / 'report_template.hwpx'
@@ -39,8 +43,10 @@ def report_date(value):
     return dt.date(*map(int, parts.groups()))
 
 
-def output_name(date, extension='.hwp'):
-    return f'생방기술국_회의자료_{report_date(date):%y%m%d}{extension}'
+def output_name(date, extension='.hwp', department='생방기술국'):
+    if department not in REPORT_DEPARTMENTS:
+        raise ValueError('저장할 부서를 확인하세요.')
+    return f'{department}_회의자료_{report_date(date):%y%m%d}{extension}'
 
 
 def weekday_name(date):
@@ -284,7 +290,25 @@ def replace_span(p, start, end, replacement):
             p.remove(child)
 
 
-def template_skeleton(source, destination, date, weekday):
+def strip_paragraph_prefix(p, preserve_tabs=False):
+    """글자 모양·개체를 보존하며 문단 앞의 수동 공백만 제거한다."""
+    for t in texts(p):
+        t.text = (t.text or '').lstrip(' \t\u00a0\u3000')
+        if t.text:
+            return
+        for child in list(t):
+            if local(child) != 'tab' or preserve_tabs:
+                return
+            # 첫 글자 이전의 수동 탭만 제거하고 그 뒤의 문자열은 그대로 연결한다.
+            t.remove(child)
+            t.text = (child.tail or '').lstrip(' \t\u00a0\u3000')
+            if t.text:
+                return
+
+
+def template_skeleton(source, destination, date, weekday, department='생방기술2'):
+    if department not in REPORT_DEPARTMENTS:
+        raise ValueError('부서를 확인하세요.')
     pack = Package(source)
     # 첫 번째 파일에 한쪽 항목만 있어도 빠진 구분 제목을 사본에 만든다.
     present = [(p, heading(p)) for p in pack.paras if heading(p)]
@@ -304,7 +328,7 @@ def template_skeleton(source, destination, date, weekday):
     positions = [(i, heading(p)) for i, p in enumerate(pack.paras) if heading(p)]
     if [k for _, k in positions] != list(KINDS):
         raise ValueError('내장 양식의 추진실적/추진계획 구분 제목을 확인할 수 없습니다.')
-    # 실제 양식: 2026.09.23.(수) 생방기술2. 날짜/요일 외 문자열은 유지.
+    # 날짜·요일과 부서명만 교체하고 주변 글자 모양은 유지한다.
     pattern = re.compile(r'(?P<date>\d{4}\s*[.\-/]\s*\d{1,2}\s*[.\-/]\s*\d{1,2}\s*\.?)'
                          r'(?P<gap>\s*)\((?P<day>[월화수목금토일](?:요일)?)\)')
     found = []
@@ -317,6 +341,9 @@ def template_skeleton(source, destination, date, weekday):
     p, match = found[0]
     replace_span(p, match.start('day'), match.end('day'), weekday)
     replace_span(p, match.start('date'), match.end('date'), date)
+    for p in pack.paras[:positions[0][0]]:
+        for match in reversed(list(re.finditer(r'생방기술(?:[12]|국)', text(p)))):
+            replace_span(p, match.start(), match.end(), department)
     markers = {}
     gaps = {}
     for n in range(len(positions) - 1, -1, -1):
@@ -392,8 +419,19 @@ def body_spacing(source, destination, gaps, expected=None):
     write_package(data, destination)
 
 
-def extract_previous_plans(source, folder, log):
-    """지난주 최종본의 생방기술2 추진계획만 독립된 사본으로 추출."""
+class LoadCancelled(Exception):
+    """사용자가 부서 경계 선택을 취소함."""
+
+
+def boundary_prompt(department):
+    return ('생방기술1의 마지막 추진실적을 선택하시오.' if department == '생방기술1'
+            else '생방기술2의 첫 번째 추진실적을 선택하시오.')
+
+
+def extract_previous_plans(source, folder, log, department='생방기술2', select_boundary=None):
+    """지난주 추진계획 중 선택 부서의 업무·본문·표를 독립된 사본으로 추출."""
+    if department not in DEPARTMENTS:
+        raise ValueError('부서를 확인하세요.')
     with zipfile.ZipFile(source) as z:
         data = {name: z.read(name) for name in z.namelist()}
     names = sorted((n for n in data if re.fullmatch(r'Contents/section\d+\.xml', n)),
@@ -410,16 +448,6 @@ def extract_previous_plans(source, folder, log):
         if heading(p) == '추진계획':
             end = next((j for j in range(i + 1, len(paras)) if heading(paras[j])), len(paras))
             ranges.append((i, end))
-    boundaries = []
-    for first, end in ranges:
-        for i in range(first + 1, end):
-            title = PREFIX.sub('', text(paras[i])).strip()
-            if re.sub(r'\s+', '', title) == '견학및기타제작사항':
-                boundaries.append((first, end, i))
-    if len(boundaries) != 1:
-        raise ValueError('지난주 추진계획에서 ‘견학 및 기타 제작사항’ 업무를 '
-                         f'하나로 찾지 못했습니다 ({len(boundaries)}개). 생방기술1이 섞이지 않도록 중단합니다.')
-    first, end, boundary = boundaries[0]
     header = E.fromstring(data['Contents/header.xml'], parser)
     shapes = {x.get('id'): x for x in header.iter() if local(x) == 'paraPr'}
 
@@ -431,15 +459,62 @@ def extract_previous_plans(source, folder, log):
         if shape is None or not text(p).strip():
             return False
         return any(local(x) == 'heading' and x.get('type') == 'NUMBER'
-                   and x.get('level') == '0' for x in shape)
+                   and x.get('level', '0') == '0' for x in shape)
 
-    start = next((i for i in range(boundary + 1, end) if is_title(paras[i])), None)
-    if start is None:
-        raise ValueError('지난주 추진계획의 경계 업무 다음에서 생방기술2 업무 제목을 찾지 못했습니다.')
+    candidates = []
+    for first, end in ranges:
+        nonempty = [i for i in range(first + 1, end) if not blank(paras[i])]
+        if not nonempty:
+            continue
+        starts = [i for i in nonempty if is_title(paras[i])] or [nonempty[0]]
+        signatures = {Package.title_signature(paras[i]) for i in starts}
+        for i in nonempty:
+            title = text(paras[i]).strip()
+            if (i not in starts and title and not title.startswith(('-', '※', '○', '●', '·', '▶'))
+                    and Package.title_signature(paras[i]) in signatures):
+                starts.append(i)
+        starts.sort()
+        if starts[0] != nonempty[0]:
+            raise ValueError('지난주 추진계획의 첫 업무 제목을 식별하지 못했습니다.')
+        for i in starts:
+            title = PREFIX.sub('', text(paras[i]), count=1).strip()
+            if not title:
+                raise ValueError('지난주 추진계획의 업무 제목이 비어 있습니다.')
+            candidates.append((first, end, i, title))
+    if not candidates:
+        raise ValueError('지난주 추진계획에서 업무 제목을 찾지 못했습니다.')
+    boundaries = [n for n, (_, _, _, title) in enumerate(candidates)
+                  if re.sub(r'\s+', '', title) == '견학및기타제작사항']
+    if len(boundaries) > 1:
+        raise ValueError('지난주 추진계획의 ‘견학 및 기타 제작사항’ 업무가 여러 개여서 부서를 구분할 수 없습니다.')
+    if boundaries:
+        chosen = boundaries[0]
+        first, end, boundary, _ = candidates[chosen]
+        # 경계 업무에 속한 본문·표는 다음 제목 직전까지 생방기술1에 포함한다.
+        following = next((i for f, _, i, _ in candidates[chosen + 1:] if f == first), end)
+        first_title = next(c[2] for c in candidates if c[0] == first)
+        start, stop = ((first_title, following)
+                       if department == '생방기술1' else (following, end))
+        if start == stop:
+            raise ValueError('지난주 추진계획의 경계 업무 다음에서 생방기술2 업무 제목을 찾지 못했습니다.')
+        log(f'‘견학 및 기타 제작사항’을 생방기술1의 마지막 업무로 구분합니다: {department}')
+    else:
+        if select_boundary is None:
+            raise ValueError('지난주 추진계획에 ‘견학 및 기타 제작사항’ 업무가 없습니다. ' + boundary_prompt(department))
+        log('자동 구분 제목이 없어 이번 주 추진실적으로 이월할 업무의 부서 경계를 선택합니다.')
+        chosen = select_boundary(department, [c[3] for c in candidates])
+        if chosen is None:
+            raise LoadCancelled()
+        if type(chosen) is not int or not 0 <= chosen < len(candidates):
+            raise ValueError('선택한 업무를 확인할 수 없습니다.')
+        first, end, boundary, title = candidates[chosen]
+        first_title = next(c[2] for c in candidates if c[0] == first)
+        following = next((c[2] for c in candidates[chosen + 1:] if c[0] == first), end)
+        start, stop = ((first_title, following) if department == '생방기술1' else (boundary, end))
+        log(f'{department} 수동 경계: {title} (선택 업무 포함)')
     plan_heading = paras[first]
-    selected = [copy.deepcopy(p) for p in paras[start:end]]
-    log('지난주 추진계획의 ‘견학 및 기타 제작사항’ 본문·표 다음 업무부터 가져옵니다: '
-        + text(paras[start]).strip())
+    selected = [copy.deepcopy(p) for p in paras[start:stop]]
+    log(f'{department} 지난주 추진계획 추출 시작: ' + text(paras[start]).strip())
     root = copy.deepcopy(roots[0])
     for child in list(root):
         root.remove(child)
@@ -474,13 +549,13 @@ def extract_previous_plans(source, folder, log):
             if local(node) == 'itemref' and node.get('idref') in removed_ids:
                 node.getparent().remove(node)
         data['Contents/content.hpf'] = E.tostring(manifest, encoding='UTF-8', xml_declaration=True)
-    target = Path(folder) / 'previous_department2_plans.hwpx'
+    target = Path(folder) / f'previous_department{DEPARTMENTS.index(department) + 1}_plans.hwpx'
     write_package(data, target)
-    log('생방기술2 추진계획만 추출했습니다. 생방기술1 및 지난주 추진실적은 제외합니다.')
+    log(f'{department} 추진계획만 추출했습니다. 지난주 추진실적은 제외합니다.')
     return target
 
 
-def prepare(paths, folder, log, previous_path=None):
+def prepare(paths, folder, log, previous_path=None, department='생방기술2', select_boundary=None):
     """1단계: 파일을 임시 사본으로 변환하고 업무 제목을 불러온다."""
     import pythoncom
     from pyhwpx import Hwp
@@ -497,14 +572,14 @@ def prepare(paths, folder, log, previous_path=None):
         if not hwp.open(str(previous_path)) or not hwp.save_as(str(previous_target), format='HWPX'):
             raise RuntimeError('지난주 최종본 열기/변환 실패')
         hwp.clear(1)
-        previous_pack_path = extract_previous_plans(previous_target, folder, log)
+        previous_pack_path = extract_previous_plans(previous_target, folder, log, department, select_boundary)
         previous_pack = Package(previous_pack_path)
         previous_items = previous_pack.items(previous_path, kinds=('추진계획',))['추진계획']
         if not previous_items:
-            raise ValueError('지난주 생방기술2 추진계획에서 업무를 찾지 못했습니다.')
+            raise ValueError(f'지난주 {department} 추진계획에서 업무를 찾지 못했습니다.')
         items['추진실적'] = [WorkItem(item.key, '추진실적', item.title, previous_path,
                                      previous_pack_path, item.first, item.end) for item in previous_items]
-        log(f'이번 주 추진실적: 지난주 생방기술2 추진계획 {len(previous_items)}개 (지난주 순서로 불러옴 · 이후 순서 조정 가능)')
+        log(f'이번 주 추진실적: 지난주 {department} 추진계획 {len(previous_items)}개 (지난주 순서로 불러옴 · 이후 순서 조정 가능)')
         for n, path in enumerate(paths):
             log(f'제목 읽는 중: {path.name}')
             target = folder / f'source_{n}.hwpx'
@@ -531,8 +606,55 @@ def prepare(paths, folder, log, previous_path=None):
         pythoncom.CoUninitialize()
 
 
+def collect_final_items(reports, log):
+    """생방기술1·2 결과 사본의 실적·계획을 각각 부서 순서대로 연결한다."""
+    if len(reports) != 2:
+        raise ValueError('생방기술1과 생방기술2 파일을 각각 한 개씩 선택하세요.')
+    items = {kind: [] for kind in KINDS}
+    for department, (source, package) in zip(DEPARTMENTS, reports):
+        pack = Package(package)
+        extracted = pack.items(Path(source))
+        if not all(extracted.values()):
+            raise ValueError(f'{department} 파일의 추진실적과 추진계획에 업무가 모두 있어야 합니다.')
+        for kind in KINDS:
+            items[kind].extend(WorkItem(item.key, kind, item.title, Path(source), Path(package),
+                                        item.first, item.end) for item in extracted[kind])
+            log(f'{department}: {kind} {len(extracted[kind])}개')
+    return items
+
+
+def prepare_final(paths, folder, log):
+    """두 부서 결과 파일을 임시 HWPX 사본으로 읽는다. 주간 이월은 하지 않는다."""
+    if len(paths) != 2 or Path(paths[0]).resolve() == Path(paths[1]).resolve():
+        raise ValueError('서로 다른 생방기술1·2 파일을 각각 한 개씩 선택하세요.')
+    import pythoncom
+    from pyhwpx import Hwp
+    pythoncom.CoInitialize()
+    hwp = None
+    try:
+        hwp = Hwp(new=True, visible=True)
+        reports = []
+        for n, (department, source) in enumerate(zip(DEPARTMENTS, paths), 1):
+            source = Path(source)
+            log(f'{department} 결과 파일 읽는 중: {source.name}')
+            target = Path(folder) / f'department_{n}.hwpx'
+            if not hwp.open(str(source)) or not hwp.save_as(str(target), format='HWPX'):
+                raise RuntimeError(f'{department} 파일 읽기/변환 실패')
+            hwp.clear(1)
+            reports.append((source, target))
+        return collect_final_items(reports, log)
+    finally:
+        if hwp is not None:
+            try:
+                hwp.clear(1)
+                hwp.quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
+
 def review_styles(source, destination, log):
-    """최종 문단 스타일/들여쓰기 검사. 표 안 문단과 개체 배치는 유지."""
+    """지정 스타일의 문단 서식을 적용하되 실제 내어쓰기 정렬만 보존한다."""
     pack = Package(source)
     styles = {x.get('name'): x for x in pack.header.iter()
               if local(x) == 'style' and x.get('type') == 'PARA'}
@@ -566,34 +688,47 @@ def review_styles(source, destination, log):
     first_heading = next(i for i,p in enumerate(pack.paras) if heading(p))
     counts = {name: 0 for name in required}
     checked = []
-    title_shapes = {}
+    hanging_shapes = {}
+    preserved = 0
 
-    def apply(p, name, title=False, preserve_layout=False):
+    def apply(p, name):
+        nonlocal preserved
         style = styles[name]
         p.set('styleIDRef', style.get('id'))
-        target = p.get('paraPrIDRef') if preserve_layout else style.get('paraPrIDRef')
-        if title:
-            # 상단 제목의 가운데 정렬/줄 간격은 유지하고 들여쓰기만 바탕글에 맞춘다.
-            old = p.get('paraPrIDRef')
-            if old not in title_shapes:
-                cloned = copy.deepcopy(pack.shapes[old])
-                base = pack.shapes[target]
-                for tag in ('intent', 'left', 'right'):
-                    a = [x for x in cloned.iter() if local(x) == tag]
-                    b = [x for x in base.iter() if local(x) == tag]
-                    for x,y in zip(a,b):
-                        x.attrib.clear()
-                        x.attrib.update(y.attrib)
+        old = p.get('paraPrIDRef')
+        original = pack.shapes[old]
+        target = style.get('paraPrIDRef')
+        # Shift+Tab은 음수 첫 줄 값(내어쓰기)과 왼쪽 여백·탭 위치로 저장된다.
+        # 단순히 스타일과 다른 문단이라는 이유로 원본 서식 전체를 보존하지 않는다.
+        hanging = any(local(x) == 'intent' and int(x.get('value', '0')) < 0
+                      for x in original.iter())
+        if hanging:
+            key = (old, target)
+            if key not in hanging_shapes:
+                cloned = copy.deepcopy(pack.shapes[target])
+                cloned.set('tabPrIDRef', original.get('tabPrIDRef', '0'))
+                old_margins = [x for x in original.iter() if local(x) == 'margin']
+                for n, margin in enumerate(x for x in cloned.iter() if local(x) == 'margin'):
+                    old_margin = old_margins[min(n, len(old_margins)-1)]
+                    for tag in ('intent', 'left', 'right'):
+                        a = next((x for x in margin if local(x) == tag), None)
+                        b = next((x for x in old_margin if local(x) == tag), None)
+                        if a is not None and b is not None:
+                            a.attrib.clear()
+                            a.attrib.update(b.attrib)
                 ident = str(pack.next_shape)
                 pack.next_shape += 1
                 cloned.set('id', ident)
-                parent = pack.shapes[old].getparent()
+                parent = pack.shapes[target].getparent()
                 parent.append(cloned)
                 parent.set('itemCnt', str(len(parent)))
                 pack.shapes[ident] = cloned
-                title_shapes[old] = ident
-            target = title_shapes[old]
+                hanging_shapes[key] = ident
+            target = hanging_shapes[key]
+            preserved += 1
         p.set('paraPrIDRef', target)
+        # 줄 앞의 수동 공백은 문단 여백 대신 쓰지 않는다. 본문 안의 공백·탭·줄바꿈은 유지한다.
+        strip_paragraph_prefix(p, preserve_tabs=hanging)
         # 자동 번호/글머리표와 수동으로 적힌 기호가 중복되지 않게 한다.
         pack.no_number(p)
         for child in list(p):
@@ -602,29 +737,38 @@ def review_styles(source, destination, log):
         counts[name] += 1
         checked.append((p, name))
 
-    for i,p in enumerate(pack.paras):
-        s = text(p)
-        if i < first_heading:
-            if re.match(r'^\s*\d{4}[.\-/]', s):
-                apply(p, '날짜')
-            elif s.strip():
-                apply(p, '바탕글', title=True)
-            # 이 양식의 상단 제목은 도형 안에 들어 있다.
-            for q in p.findall('./hp:run/hp:container//hp:p', NS):
-                if text(q).strip() and not any(local(a) == 'tbl' for a in q.iterancestors()):
-                    apply(q, '바탕글', title=True)
-            continue
-        if heading(p):
-            apply(p, '추진')
-        elif re.match(r'^\s*(\d{1,3})\.', s):
-            number = int(re.match(r'^\s*(\d{1,3})\.', s).group(1))
-            pack.renumber(p, number)
-            apply(p, '1,2,3')
-        elif s.lstrip().startswith(('·', '-')):
-            marker = s.lstrip()[0]
-            # Shift+Tab으로 지정한 내어쓰기/탭/왼쪽 여백은 직접 문단 서식에 저장된다.
-            # 스타일 이름만 맞추고 원본 문단 서식과 앞쪽 공백·탭은 유지한다.
-            apply(p, marker, preserve_layout=True)
+    style_names = {s.get('id'): name for name, s in styles.items()}
+    active = {}
+    for i, top in enumerate(pack.paras):
+        # 표·글상자 안의 문단도 같은 분류 규칙으로 확인한다. 표·개체 구조는 변경하지 않는다.
+        for p in top.iter(f'{{{HP}}}p'):
+            s = text(p)
+            if not s.strip():
+                continue
+            parent = p.getparent()
+            if i < first_heading:
+                name = '날짜' if re.match(r'^\s*\d{4}[.\-/]', s) else '바탕글'
+            elif heading(p):
+                name = '추진'
+                active[parent] = '바탕글'
+            elif re.match(r'^\s*\d{1,3}\.(?!\d)', s):
+                number = int(re.match(r'^\s*(\d{1,3})\.', s).group(1))
+                pack.renumber(p, number)
+                name = '1,2,3'
+                active[parent] = '바탕글'
+            elif s.lstrip().startswith(('·', '-')):
+                name = s.lstrip()[0]
+                active[parent] = name
+            else:
+                # 기호 없는 이어지는 문단도 원래 본문 스타일 또는 직전 본문 단계를 적용한다.
+                old_name = style_names.get(p.get('styleIDRef'))
+                # 표의 일반 셀(열 이름·프로그램명 등)은 제목/번호/기호 문단에 해당하지 않는다.
+                # 해당 역할이 식별된 셀 문단과 그 이어지는 문단에만 위 규칙을 적용한다.
+                if (any(local(a) == 'tbl' for a in p.iterancestors())
+                        and old_name not in ('-', '·') and parent not in active):
+                    continue
+                name = old_name if old_name in ('-', '·') else active.get(parent, '바탕글')
+            apply(p, name)
     for p,name in checked:
         if p.get('styleIDRef') != styles[name].get('id'):
             raise ValueError(f'{name} 스타일 적용 검사 실패')
@@ -634,10 +778,11 @@ def review_styles(source, destination, log):
     data[pack.section_name] = E.tostring(pack.root, encoding='UTF-8', xml_declaration=True)
     data['Contents/header.xml'] = E.tostring(pack.header, encoding='UTF-8', xml_declaration=True)
     write_package(data, destination)
-    log('최종 스타일 검사 완료 (본문의 원본 내어쓰기·탭 정렬 유지): ' + ' / '.join(f'{k} {v}문단' for k,v in counts.items()))
+    log(f'최종 스타일 검사 완료 (스타일 문단 서식 적용·선행 공백 제거, 내어쓰기 {preserved}문단 정렬 유지): '
+        + ' / '.join(f'{k} {v}문단' for k,v in counts.items()))
 
 
-def merge(ordered, output, date, weekday, template, log):
+def merge(ordered, output, date, weekday, template, log, department='생방기술2'):
     import pythoncom
     from pyhwpx import Hwp
     pythoncom.CoInitialize()
@@ -656,7 +801,7 @@ def merge(ordered, output, date, weekday, template, log):
                 raise RuntimeError('양식 변환 실패')
             hwp.clear(1)
             skeleton = folder / 'skeleton.hwpx'
-            markers, gaps = template_skeleton(template_copy, skeleton, date, weekday)
+            markers, gaps = template_skeleton(template_copy, skeleton, date, weekday, department)
             fragments = {kind: [] for kind in KINDS}
             for kind in KINDS:
                 for n, item in enumerate(ordered[kind]):
@@ -904,6 +1049,60 @@ class CompletionDialog(tk.Toplevel):
         self.update_idletasks()
 
 
+class BoundaryDialog(tk.Toplevel):
+    def __init__(self, owner, department, titles):
+        super().__init__(owner)
+        self.withdraw()
+        self.title('추진실적 부서 구분')
+        self.transient(owner)
+        self.configure(bg='white')
+        self.ui_scale = owner.ui_scale
+        self.result = None
+        apply_app_icon(self)
+        body = ttk.Frame(self, padding=20, style='Card.TFrame')
+        body.pack(fill='both', expand=True)
+        self.prompt = ttk.Label(body, text=boundary_prompt(department), style='Heading.TLabel')
+        self.prompt.pack(anchor='w', pady=(0, 12))
+        ttk.Label(body, text='지난주 추진계획에서 이번 주 추진실적으로 가져올 업무를 구분합니다.',
+                  style='Muted.TLabel').pack(anchor='w', pady=(0, 10))
+        listing = ttk.Frame(body)
+        listing.pack(fill='both', expand=True)
+        self.listbox = tk.Listbox(listing, height=min(12, max(4, len(titles))),
+                                  width=52, exportselection=False, selectmode='browse',
+                                  bd=0, highlightthickness=1, highlightbackground='#d9d9d9')
+        self.listbox.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(listing, command=self.listbox.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        for title in titles:
+            self.listbox.insert('end', title)
+        horizontal = ttk.Scrollbar(body, orient='horizontal', command=self.listbox.xview)
+        horizontal.pack(fill='x')
+        self.listbox.configure(xscrollcommand=horizontal.set)
+        buttons = ttk.Frame(body)
+        buttons.pack(fill='x', pady=(16, 0))
+        self.confirm_button = ttk.Button(buttons, text='선택', command=self.confirm, state='disabled')
+        self.confirm_button.pack(side='right')
+        ttk.Button(buttons, text='취소', command=self.destroy).pack(side='right', padx=(0, 8))
+        self.listbox.bind('<<ListboxSelect>>', lambda e: self.confirm_button.configure(
+            state='normal' if self.listbox.curselection() else 'disabled'))
+        self.listbox.bind('<Double-Button-1>', lambda e: self.confirm())
+        self.bind('<Return>', lambda e: self.confirm())
+        self.bind('<Escape>', lambda e: self.destroy())
+        scale_widget_spacing(body, self.ui_scale)
+        self.update_idletasks()
+        self.deiconify()
+        CompletionDialog.place_centered(self, owner)
+        self.grab_set()
+        self.listbox.focus_set()
+
+    def confirm(self):
+        selected = self.listbox.curselection()
+        if selected:
+            self.result = selected[0]
+            self.destroy()
+
+
 class DatePicker(tk.Toplevel):
     def __init__(self, owner, selected, on_select):
         super().__init__(owner)
@@ -1031,6 +1230,10 @@ class App(tk.Tk):
         self.paths = []
         self.previous_path = None
         self.loaded_previous = None
+        self.department = '생방기술2'
+        self.loaded_department = None
+        self.final_paths = {department: None for department in DEPARTMENTS}
+        self.final_text = {department: tk.StringVar(value='선택된 파일이 없습니다') for department in DEPARTMENTS}
         self.items = {kind: [] for kind in KINDS}
         self.item_lists = {}
         self.item_counts = {}
@@ -1059,7 +1262,15 @@ class App(tk.Tk):
         header = ttk.Frame(box, style='Page.TFrame')
         header.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 16))
         ttk.Label(header, text='주간 회의자료', style='Title.TLabel').pack(side='left')
-        ttk.Label(header, text='생방기술2', style='Badge.TLabel', padding=(12, 6)).pack(side='right')
+        department_box = ttk.Frame(header, style='Page.TFrame')
+        department_box.pack(side='right')
+        self.department_buttons = {}
+        for department in MODES:
+            button = ttk.Button(department_box, text=department, style='Department.TButton',
+                                command=lambda d=department: self.select_department(d))
+            button.pack(side='left', padx=(6, 0))
+            self.department_buttons[department] = button
+            button.state(['selected'] if department == self.department else ['!selected'])
 
         left_shell = ttk.Frame(box, style='Page.TFrame')
         left_shell.grid(row=1, column=0, sticky='nsew', padx=(0, 14))
@@ -1085,7 +1296,11 @@ class App(tk.Tk):
         self.bind('<MouseWheel>', scroll_inputs, add='+')
         left.columnconfigure(0, weight=1)
         left.rowconfigure(1, weight=1)
-        card = Card(left)
+        self.department_inputs = ttk.Frame(left, style='Page.TFrame')
+        self.department_inputs.grid(row=0, column=0, rowspan=2, sticky='nsew')
+        self.department_inputs.columnconfigure(0, weight=1)
+        self.department_inputs.rowconfigure(1, weight=1)
+        card = Card(self.department_inputs)
         card.grid(row=0, column=0, sticky='ew', pady=(0, 10))
         body = card.body
         ttk.Label(body, text='01  지난주 최종본', style='Heading.TLabel').pack(anchor='w')
@@ -1093,7 +1308,7 @@ class App(tk.Tk):
         ttk.Entry(body, textvariable=self.previous_text, state='readonly', width=28).pack(fill='x')
         ttk.Button(body, text='추가', command=self.choose_previous).pack(fill='x', pady=(10, 0))
 
-        card = Card(left)
+        card = Card(self.department_inputs)
         card.grid(row=1, column=0, sticky='nsew', pady=(0, 10))
         body = card.body
         ttk.Label(body, text='02  이번 주 취합 파일', style='Heading.TLabel').pack(anchor='w')
@@ -1109,6 +1324,22 @@ class App(tk.Tk):
             ttk.Button(file_buttons, text=label, width=4, command=command).pack(side='left', padx=(0, 5), expand=True, fill='x')
         self.load_button = ttk.Button(body, text='업무 제목 불러오기', style='Load.Primary.TButton', command=self.load_titles)
         self.load_button.pack(fill='x', pady=(10, 0))
+
+        self.final_inputs = ttk.Frame(left, style='Page.TFrame')
+        self.final_inputs.grid(row=0, column=0, rowspan=2, sticky='nsew')
+        self.final_inputs.columnconfigure(0, weight=1)
+        self.final_inputs.rowconfigure(1, weight=1)
+        for n, department in enumerate(DEPARTMENTS):
+            card = Card(self.final_inputs)
+            card.grid(row=n, column=0, sticky='nsew', pady=(0, 10))
+            body = card.body
+            ttk.Label(body, text=f'0{n+1}  {department} 회의자료', style='Heading.TLabel').pack(anchor='w')
+            ttk.Label(body, text='완성된 추진실적·추진계획을 가져옵니다', style='Muted.TLabel').pack(anchor='w', pady=(3, 10))
+            ttk.Entry(body, textvariable=self.final_text[department], state='readonly', width=28).pack(fill='x')
+            ttk.Button(body, text='추가', command=lambda d=department: self.choose_final(d)).pack(fill='x', pady=(10, 0))
+        self.final_load_button = ttk.Button(body, text='업무 제목 불러오기', style='Load.Primary.TButton', command=self.load_titles)
+        self.final_load_button.pack(fill='x', pady=(10, 0))
+        self.final_inputs.grid_remove()
 
         card = Card(left)
         card.grid(row=2, column=0, sticky='ew')
@@ -1133,12 +1364,14 @@ class App(tk.Tk):
         card.grid(row=0, column=0, sticky='nsew', pady=(0, 10))
         body = card.body
         ttk.Label(body, text='회의자료 순서', style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(body, text='두 항목 모두 드래그 또는 이동 버튼으로 조정할 수 있습니다.', style='Muted.TLabel').pack(anchor='w', pady=(4, 6))
+        self.order_help = tk.StringVar(value='두 항목 모두 드래그 또는 이동 버튼으로 조정할 수 있습니다.')
+        ttk.Label(body, textvariable=self.order_help, style='Muted.TLabel').pack(anchor='w', pady=(4, 6))
         self.preview_label = ttk.Label(body, textvariable=self.preview_state, style='Accent.TLabel', wraplength=round(500*self.ui_scale))
         self.preview_label.pack(anchor='w', fill='x', pady=(0, 12))
         body.bind('<Configure>', lambda e: self.preview_label.config(wraplength=max(round(180*self.ui_scale), e.width-round(38*self.ui_scale))))
         self.tabs = ttk.Notebook(body)
         self.tabs.pack(fill='both', expand=True)
+        self.order_buttons = []
         for kind in KINDS:
             panel = ttk.Frame(self.tabs, padding=(8, 12, 8, 4))
             self.tabs.add(panel, text=f'  {kind}  ')
@@ -1156,8 +1389,10 @@ class App(tk.Tk):
             self.item_lists[kind] = listing
             row_move = ttk.Frame(panel)
             row_move.pack(fill='x', pady=(10, 0))
-            ttk.Button(row_move, text='↑ 위로', command=lambda k=kind: self.move_item(k, -1)).pack(side='left')
-            ttk.Button(row_move, text='↓ 아래로', command=lambda k=kind: self.move_item(k, 1)).pack(side='left', padx=6)
+            for label, delta in [('↑ 위로', -1), ('↓ 아래로', 1)]:
+                button = ttk.Button(row_move, text=label, command=lambda k=kind, d=delta: self.move_item(k, d))
+                button.pack(side='left', padx=(0, 6))
+                self.order_buttons.append(button)
         card = Card(right)
         card.grid(row=1, column=0, sticky='ew', pady=(0, 10))
         body = card.body
@@ -1220,6 +1455,11 @@ class App(tk.Tk):
         style.configure('Badge.TLabel', foreground='#171717', background='#e8e8e8', font=self.ui_fonts['small_bold'])
         style.configure('TButton', padding=p(12, 7), background='#eeeeee', foreground='#171717', borderwidth=0, relief='flat')
         style.map('TButton', background=[('disabled', '#eeeeee'), ('pressed', '#d9d9d9'), ('active', '#e2e2e2')], foreground=[('disabled', '#808080')])
+        style.configure('Department.TButton', padding=p(12, 6), font=self.ui_fonts['small_bold'],
+                        background='#e8e8e8', foreground='#171717')
+        style.map('Department.TButton',
+                  background=[('selected', '#171717'), ('active', '#d9d9d9'), ('!selected', '#e8e8e8')],
+                  foreground=[('selected', 'white'), ('!selected', '#171717')])
         style.configure('Soft.TButton', background='#e8e8e8', foreground='#171717')
         # 주요 실행 버튼은 블랙 바탕·화이트 글씨로 뚜렷하게 강조한다.
         style.configure('Primary.TButton', padding=p(16, 13), background='#171717', foreground='white', font=self.ui_fonts['action'])
@@ -1448,7 +1688,7 @@ class App(tk.Tk):
         name = filedialog.askdirectory(title='최종 회의자료를 저장할 폴더')
         if name:
             try:
-                self.output.set(str(Path(name) / output_name(self.date.get())))
+                self.output.set(str(Path(name) / output_name(self.date.get(), department=self.output_department())))
             except ValueError as e:
                 messagebox.showerror('날짜 확인', str(e))
 
@@ -1470,17 +1710,72 @@ class App(tk.Tk):
             self.weekday.set('날짜 확인')
         if self.output.get():
             try:
-                self.output.set(str(Path(self.output.get()).parent / output_name(self.date.get())))
+                self.output.set(str(Path(self.output.get()).parent / output_name(self.date.get(), department=self.output_department())))
             except ValueError:
                 pass
 
     def invalidate(self):
         self.loaded_paths = None
         self.loaded_previous = None
+        self.loaded_department = None
         self.items = {kind: [] for kind in KINDS}
         for kind in KINDS:
             self.refresh_items(kind)
         self.preview_state.set('파일 목록이 바뀌었습니다. 업무 제목을 다시 불러오세요.')
+
+    def select_department(self, department):
+        if self.busy or department == self.department or department not in MODES:
+            return
+        self.close_calendar()
+        self.department = department
+        for name, button in self.department_buttons.items():
+            button.state(['selected'] if name == department else ['!selected'])
+        combined = department == COMBINED_MODE
+        (self.department_inputs if combined else self.final_inputs).grid_remove()
+        (self.final_inputs if combined else self.department_inputs).grid()
+        self.order_help.set('생방기술1 → 생방기술2 순서로 자동 취합합니다.' if combined
+                            else '두 항목 모두 드래그 또는 이동 버튼으로 조정할 수 있습니다.')
+        for button in self.order_buttons:
+            button.configure(state='disabled' if combined else 'normal')
+        self.start_button.configure(text='생방기술국 최종 취합  →' if combined else '최종 회의자료 만들기  →')
+        self.left_canvas.yview_moveto(0)
+        self.invalidate()
+        self.update_filename()
+        self.preview_state.set(f'{department} 모드입니다. 업무 제목을 다시 불러오세요.')
+
+    def output_department(self):
+        return '생방기술국' if self.department == COMBINED_MODE else self.department
+
+    def current_inputs(self):
+        if self.department == COMBINED_MODE:
+            return [self.final_paths[d] for d in DEPARTMENTS], None
+        return list(self.paths), self.previous_path
+
+    def choose_final(self, department):
+        if self.busy:
+            return
+        name = filedialog.askopenfilename(title=f'{department} 회의자료 선택', filetypes=[('한글 문서', '*.hwp *.hwpx')])
+        if name:
+            path = Path(name).resolve()
+            if path != self.final_paths[department]:
+                self.final_paths[department] = path
+                self.final_text[department].set(path.name)
+                self.invalidate()
+
+    def set_busy(self, busy):
+        self.busy = busy
+        state = 'disabled' if busy else 'normal'
+        self.start_button.configure(state=state)
+        self.load_button.configure(state=state)
+        self.final_load_button.configure(state=state)
+        for button in self.department_buttons.values():
+            button.configure(state=state)
+
+    def request_boundary(self, department, titles):
+        # 한/글 작업 스레드에서 Tk를 직접 호출하지 않고 UI 스레드의 응답을 기다린다.
+        response = queue.Queue(maxsize=1)
+        self.events.put(('boundary', (department, titles, response)))
+        return response.get()
 
     def refresh_items(self, kind, selected=None):
         listing = self.item_lists[kind]
@@ -1499,7 +1794,7 @@ class App(tk.Tk):
     def drag_begin(self, kind, event):
         self.drag_start.pop(kind, None)
         listing = self.item_lists[kind]
-        if self.busy or not self.items[kind] or listing.identify_region(event.x, event.y) != 'cell':
+        if self.busy or self.department == COMBINED_MODE or not self.items[kind] or listing.identify_region(event.x, event.y) != 'cell':
             return
         row = listing.identify_row(event.y)
         if row:
@@ -1508,7 +1803,7 @@ class App(tk.Tk):
             listing.focus(row)
 
     def drag_motion(self, kind, event):
-        if self.busy or kind not in self.drag_start:
+        if self.busy or self.department == COMBINED_MODE or kind not in self.drag_start:
             return
         listing = self.item_lists[kind]
         if event.y < round(30*self.ui_scale):
@@ -1523,7 +1818,7 @@ class App(tk.Tk):
 
     def drag_end(self, kind, event):
         source = self.drag_start.pop(kind, None)
-        if self.busy or source is None:
+        if self.busy or self.department == COMBINED_MODE or source is None:
             return
         listing = self.item_lists[kind]
         rows = listing.get_children()
@@ -1541,7 +1836,7 @@ class App(tk.Tk):
     def move_item(self, kind, delta):
         listing = self.item_lists[kind]
         selected = listing.selection()
-        if self.busy or not selected:
+        if self.busy or self.department == COMBINED_MODE or not selected:
             return 'break'
         source = listing.index(selected[0])
         target = source+delta
@@ -1555,27 +1850,45 @@ class App(tk.Tk):
         self.close_calendar()
         if self.busy:
             return
-        if not self.paths:
-            messagebox.showerror('파일 확인', '취합할 파일을 먼저 추가하세요.')
-            return
-        if self.previous_path is None or not self.previous_path.is_file():
-            messagebox.showerror('지난주 최종본 확인', '지난주 최종본을 별도로 선택하세요.')
-            return
-        if self.previous_path in self.paths:
-            messagebox.showerror('파일 확인', '지난주 최종본은 이번 주 취합 파일 목록에서 제외하세요.')
-            return
-        paths = list(self.paths)
-        previous = self.previous_path
+        paths, previous = self.current_inputs()
+        combined = self.department == COMBINED_MODE
+        if combined:
+            if any(p is None or not p.is_file() for p in paths):
+                messagebox.showerror('파일 확인', '생방기술1과 생방기술2 회의자료를 각각 선택하세요.')
+                return
+            if paths[0] == paths[1]:
+                messagebox.showerror('파일 확인', '생방기술1과 생방기술2에 서로 다른 파일을 선택하세요.')
+                return
+        else:
+            if not paths:
+                messagebox.showerror('파일 확인', '취합할 파일을 먼저 추가하세요.')
+                return
+            if previous is None or not previous.is_file():
+                messagebox.showerror('지난주 최종본 확인', '지난주 최종본을 별도로 선택하세요.')
+                return
+            if previous in paths:
+                messagebox.showerror('파일 확인', '지난주 최종본은 이번 주 취합 파일 목록에서 제외하세요.')
+                return
+        department = self.department
         cache = tempfile.TemporaryDirectory(prefix='report_preview_')
-        self.busy = True
-        self.load_button.config(state='disabled')
-        self.start_button.config(state='disabled')
+        self.set_busy(True)
         self.preview_state.set('업무 제목을 불러오는 중입니다…')
 
         def worker():
             try:
-                items = prepare(paths, Path(cache.name), lambda s: self.events.put(('log', s)), previous_path=previous)
-                self.events.put(('loaded', (items, cache, paths, previous)))
+                log = lambda s: self.events.put(('log', s))
+                if combined:
+                    items = prepare_final(paths, Path(cache.name), log)
+                else:
+                    items = prepare(paths, Path(cache.name), log, previous_path=previous,
+                                    department=department, select_boundary=self.request_boundary)
+                self.events.put(('loaded', (items, cache, paths, previous, department)))
+            except LoadCancelled:
+                try:
+                    cache.cleanup()
+                except OSError:
+                    pass
+                self.events.put(('cancelled', '부서 경계 선택을 취소했습니다. 업무 제목을 다시 불러오세요.'))
             except Exception:
                 error = traceback.format_exc()
                 try:
@@ -1593,24 +1906,26 @@ class App(tk.Tk):
             date = self.date.get().strip()
             report_date(date)
             weekday = weekday_name(date)
-            if self.loaded_paths != self.paths or self.loaded_previous != self.previous_path:
+            paths, previous = self.current_inputs()
+            if (self.loaded_paths != paths or self.loaded_previous != previous
+                    or self.loaded_department != self.department):
                 raise ValueError('먼저 업무 제목 불러오기를 실행한 뒤 순서를 조정하세요.')
             if self.cache_dir is None:
                 raise ValueError('업무 제목을 먼저 불러오세요.')
             template = TEMPLATE_PATH
             if not template.is_file():
                 raise ValueError('프로그램의 내장 자료를 읽을 수 없습니다. 배포 파일을 다시 받아주세요.')
-            if not self.paths or not self.output.get().strip():
+            if not paths or not self.output.get().strip():
                 raise ValueError('파일과 저장 위치를 지정하세요.')
             output = Path(self.output.get()).resolve()
-            output = output.parent / output_name(date)
+            output = output.parent / output_name(date, department=self.output_department())
             self.output.set(str(output))
             ordered = {k: list(self.items[k]) for k in KINDS}
             if not all(ordered.values()):
                 raise ValueError('추진실적과 추진계획을 모두 불러온 뒤 실행하세요.')
             if output.suffix.lower() not in ('.hwp', '.hwpx'):
                 raise ValueError('결과 확장자는 .hwp 또는 .hwpx여야 합니다.')
-            if output in self.paths or output == template or output == self.previous_path:
+            if output in paths or output == template or output == previous:
                 raise ValueError('원본 파일을 결과 저장 위치로 지정할 수 없습니다.')
             if output.exists():
                 raise ValueError('같은 이름의 결과 파일이 있습니다. 기존 결과의 이름을 바꾸거나 다른 저장 폴더를 선택하세요.')
@@ -1619,14 +1934,13 @@ class App(tk.Tk):
         except ValueError as e:
             messagebox.showerror('입력 확인', str(e))
             return
-        self.busy = True
-        self.start_button.config(state='disabled')
-        self.load_button.config(state='disabled')
+        department = self.output_department()
+        self.set_busy(True)
 
         def worker():
             try:
                 merge(ordered, output, date, weekday, template,
-                      lambda s: self.events.put(('log', s)))
+                      lambda s: self.events.put(('log', s)), department=department)
                 self.events.put(('done', str(output)))
             except Exception:
                 self.events.put(('error', traceback.format_exc()))
@@ -1635,30 +1949,43 @@ class App(tk.Tk):
     def poll(self):
         while not self.events.empty():
             kind, value = self.events.get_nowait()
+            if kind == 'boundary':
+                department, titles, response = value
+                try:
+                    dialog = BoundaryDialog(self, department, titles)
+                    self.wait_window(dialog)
+                    response.put(dialog.result)
+                except Exception:
+                    response.put(None)
+                    self.events.put(('log', '부서 경계 선택 창을 열지 못했습니다. 다시 불러오세요.'))
+                continue
             if kind == 'loaded':
-                items, cache, paths, previous = value
+                items, cache, paths, previous, department = value
                 if self.cache_dir is not None:
                     self.cache_dir.cleanup()
                 self.cache_dir = cache
                 self.items = items
                 self.loaded_paths = paths
                 self.loaded_previous = previous
+                self.loaded_department = department
                 for section in KINDS:
                     self.refresh_items(section)
-                self.preview_state.set(' / '.join(f'{k} {len(items[k])}개' for k in KINDS)
-                                       + ' — 각 탭에서 제목 순서를 확인하고 드래그하세요.')
-                self.busy = False
-                self.start_button.config(state='normal')
-                self.load_button.config(state='normal')
+                hint = (' — 생방기술1 → 생방기술2 순서로 취합합니다.' if department == COMBINED_MODE
+                        else ' — 각 탭에서 제목 순서를 확인하고 드래그하세요.')
+                self.preview_state.set(' / '.join(f'{k} {len(items[k])}개' for k in KINDS) + hint)
+                self.set_busy(False)
+                continue
+            if kind == 'cancelled':
+                self.invalidate()
+                self.preview_state.set(value)
+                self.set_busy(False)
                 continue
             self.status.config(state='normal')
             self.status.insert('end', value + '\n')
             self.status.see('end')
             self.status.config(state='disabled')
             if kind in ('done', 'error'):
-                self.busy = False
-                self.start_button.config(state='normal')
-                self.load_button.config(state='normal')
+                self.set_busy(False)
                 if kind == 'error':
                     self.preview_state.set('오류가 발생했습니다. 아래 내용을 확인하세요.')
                 if kind == 'done':
