@@ -7,6 +7,7 @@ import queue
 import re
 import sys
 import json
+import os
 import tempfile
 import threading
 import traceback
@@ -867,6 +868,39 @@ def merge(ordered, output, date, weekday, template, log, department='생방기�
         pythoncom.CoUninitialize()
 
 
+def hide_onefile_helper_window():
+    """이 EXE의 부모 부트로더에 속한 숨김 보조 창만 원래 상태로 돌린다."""
+    if sys.platform != 'win32' or not getattr(sys, 'frozen', False):
+        return
+    import pywintypes
+    import win32gui
+    import win32process
+    import ctypes
+    from ctypes import wintypes
+
+    parent_pid = os.getppid()
+    show_window = ctypes.windll.user32.ShowWindowAsync
+    show_window.argtypes = [wintypes.HWND, ctypes.c_int]
+    show_window.restype = wintypes.BOOL
+
+    def visit(hwnd, _):
+        try:
+            if (win32process.GetWindowThreadProcessId(hwnd)[1] == parent_pid
+                    and win32gui.GetClassName(hwnd) == 'PyInstallerOnefileHiddenWindow'
+                    and win32gui.GetWindowText(hwnd) == 'PyInstaller Onefile Hidden Window'
+                    and win32gui.IsWindowVisible(hwnd)):
+                # 부모의 메시지 처리를 기다리며 GUI가 멈추지 않도록 비동기로 숨긴다.
+                # 창을 닫거나 파괴하지 않아 종료·임시 파일 정리 처리는 유지된다.
+                show_window(hwnd, 0)  # SW_HIDE
+        except pywintypes.error:
+            pass  # 열거 도중 사라진 창은 다음 점검에서 다시 확인한다.
+
+    try:
+        win32gui.EnumWindows(visit, None)
+    except pywintypes.error:
+        pass
+
+
 def enable_dpi_awareness():
     """PY 실행에서도 Tk 창을 만들기 전에 Windows의 흐릿한 비트맵 확대를 해제."""
     if sys.platform != 'win32':
@@ -1202,6 +1236,7 @@ class DatePicker(tk.Toplevel):
 
 class App(tk.Tk):
     def __init__(self):
+        hide_onefile_helper_window()
         enable_dpi_awareness()
         if sys.platform == 'win32':
             import ctypes
@@ -1414,6 +1449,12 @@ class App(tk.Tk):
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.deiconify()
         self._display_job = self.after(0, self.watch_display)
+        if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+            self.after(500, self.keep_helper_window_hidden)
+
+    def keep_helper_window_hidden(self):
+        hide_onefile_helper_window()
+        self.after(500, self.keep_helper_window_hidden)
 
     def setup_theme(self):
         # 글꼴은 이 프로세스에서만 사용하며 직원 PC의 시스템 글꼴을 바꾸지 않는다.
