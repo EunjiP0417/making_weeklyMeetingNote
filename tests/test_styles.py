@@ -108,13 +108,27 @@ class StyleReviewTests(unittest.TestCase):
         self.assertEqual([report.local(x) for x in inline], ['tab', 'lineBreak'])
         self.assertEqual([x.tail for x in inline], ['탭 뒤 내용', '다음 줄'])
 
-    def test_title_date_section_and_numbered_titles_use_requested_style_indentation(self):
+    def test_template_title_date_and_surrounding_layout_are_unchanged(self):
+        original = report.Package(report.TEMPLATE_PATH)
+        stop = next(i for i, p in enumerate(original.paras) if report.heading(p))
+        before = [E.tostring(p) for p in original.paras[:stop]]
+        result = self.review()
+        self.assertEqual([E.tostring(p) for p in result.paras[:stop]], before)
+        # 도형 안의 제목까지 본문 바탕글 스타일로 덮어쓰지 않는다.
+        title = next(p for p in result.root.iter(f'{{{report.HP}}}p')
+                     if report.text(p) == '생방기술국 주요 업무 보고')
+        original_title = next(p for p in original.root.iter(f'{{{report.HP}}}p')
+                              if report.text(p) == report.text(title))
+        self.assertEqual(title.attrib, original_title.attrib)
+        self.assertEqual(paragraph_shape(result.shapes[title.get('paraPrIDRef')]),
+                         paragraph_shape(original.shapes[original_title.get('paraPrIDRef')]))
+
+    def test_section_and_numbered_titles_use_requested_style_indentation(self):
         wrong = self.add_shape()
         self.add_para('   8.  업무 제목', wrong)
         result = self.review()
         styles = {s.get('name'): s for s in result.header.iter() if report.local(s) == 'style'}
-        targets = [('생방기술국 주요 업무 보고', '바탕글'), ('2026.09.23.(수) 생방기술2', '날짜'),
-                   ('<추진실적>', '추진'), ('<추진계획>', '추진'), ('8. 업무 제목', '1,2,3')]
+        targets = [('<추진실적>', '추진'), ('<추진계획>', '추진'), ('8. 업무 제목', '1,2,3')]
         for value, name in targets:
             with self.subTest(value=value):
                 p = next(p for p in result.root.iter(f'{{{report.HP}}}p') if report.text(p) == value)

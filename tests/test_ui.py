@@ -81,13 +81,16 @@ class ReportUiTests(unittest.TestCase):
 
     def test_department_buttons_order_highlight_invalidation_and_busy_guard(self):
         buttons = self.app.department_buttons
-        self.assertEqual(list(buttons), ['생방기술1', '생방기술2', '생방1+생방2'])
+        self.assertEqual(list(buttons), ['생방기술1', '생방기술2', '생방기술국'])
         self.assertLess(buttons['생방기술1'].winfo_x(), buttons['생방기술2'].winfo_x())
         self.assertEqual(buttons['생방기술1'].winfo_width(), buttons['생방기술2'].winfo_width())
         self.assertTrue(buttons['생방기술2'].instate(['selected']))
         style = self.module.ttk.Style(self.app)
         self.assertEqual(style.lookup('Department.TButton', 'background', ('selected',)), '#171717')
         self.assertEqual(style.lookup('Department.TButton', 'foreground', ('selected',)), 'white')
+        padding = tuple(map(int, self.app.tk.splitlist(style.lookup('Department.TButton', 'padding'))))
+        self.assertEqual(padding, (round(8*self.app.ui_scale), round(6*self.app.ui_scale)))
+        self.assertEqual(self.app.start_button.cget('text'), '생방기술2 최종 취합  →')
         self.app.loaded_department = '생방기술2'
         buttons['생방기술1'].invoke()
         self.assertEqual(self.app.department, '생방기술1')
@@ -287,10 +290,10 @@ class ReportUiTests(unittest.TestCase):
                 self.assertEqual(self.app.department_inputs.winfo_ismapped(), mode != self.module.COMBINED_MODE)
                 self.assertTrue(self.app.output.get().endswith(f'{department}_회의자료_261101.hwp'))
                 self.assertIsNone(self.app.loaded_department)
-                self.assertTrue(all(b.instate(['disabled']) == (mode == self.module.COMBINED_MODE)
-                                    for b in self.app.order_buttons))
+                self.assertTrue(all(b.instate(['!disabled']) for b in self.app.order_buttons))
+                self.assertEqual(self.app.start_button.cget('text'), f'{department} 최종 취합  →')
 
-    def test_final_mode_rejects_missing_duplicate_files_and_keeps_department_order(self):
+    def test_final_mode_rejects_invalid_files_and_saves_user_reordered_items(self):
         self.app.select_department(self.module.COMBINED_MODE)
         self.app.final_paths = {d: None for d in self.module.DEPARTMENTS}
         with patch.object(self.module.messagebox, 'showerror') as error:
@@ -318,13 +321,22 @@ class ReportUiTests(unittest.TestCase):
                 self.assertEqual(prepare_final.call_args.args[0], paths)
             self.assertEqual(self.app.items, expected)
             self.assertEqual(self.app.loaded_paths, paths)
+            before = {k: self.keys(k) for k in self.module.KINDS}
             for kind in self.module.KINDS:
                 listing = self.view(kind)
                 self.app.refresh_items(kind, 0)
                 self.app.move_item(kind, 1)
+                self.assertEqual(self.keys(kind), before[kind][::-1])
                 self.app.drag_begin(kind, self.pointer(listing, 0))
-                self.assertEqual(self.app.items[kind], expected[kind])
+                self.app.drag_end(kind, self.pointer(listing, 1))
+                self.assertEqual(self.keys(kind), before[kind])
+                self.app.refresh_items(kind, 0)
+                listing.focus_set()
+                listing.event_generate('<Alt-Down>')
+                self.app.update()
+                self.assertEqual(self.keys(kind), before[kind][::-1])
                 self.assertNotIn(kind, self.app.drag_start)
+            wanted = {k: list(self.app.items[k]) for k in self.module.KINDS}
             self.app.output.set(str(Path(folder)/'placeholder.hwp'))
             with patch.object(self.module, 'merge') as merge, \
                     patch.object(self.module, 'CompletionDialog', return_value=None):
@@ -335,7 +347,7 @@ class ReportUiTests(unittest.TestCase):
                     time.sleep(.01)
                 self.assertFalse(self.app.busy)
                 merge.assert_called_once()
-                self.assertEqual(merge.call_args.args[0], expected)
+                self.assertEqual(merge.call_args.args[0], wanted)
                 self.assertEqual(merge.call_args.args[1].name, '생방기술국_회의자료_261101.hwp')
                 self.assertEqual(merge.call_args.kwargs['department'], '생방기술국')
             self.app.cache_dir.cleanup()

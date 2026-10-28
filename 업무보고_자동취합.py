@@ -22,7 +22,7 @@ HP = 'http://www.hancom.co.kr/hwpml/2011/paragraph'
 NS = {'hp': HP}
 KINDS = ('추진실적', '추진계획')
 DEPARTMENTS = ('생방기술1', '생방기술2')
-COMBINED_MODE = '생방1+생방2'
+COMBINED_MODE = '생방기술국'
 MODES = (*DEPARTMENTS, COMBINED_MODE)
 REPORT_DEPARTMENTS = (*DEPARTMENTS, '생방기술국')
 # 기본 화면과 주요 강조는 무채색, 보조 선택 표시만 차분한 파스텔 블루.
@@ -739,16 +739,16 @@ def review_styles(source, destination, log):
 
     style_names = {s.get('id'): name for name, s in styles.items()}
     active = {}
-    for i, top in enumerate(pack.paras):
+    # 제목 도형·날짜·그 앞뒤 빈 문단은 내장 양식 그대로 둔다.
+    # 상단에 본문 스타일을 덮어쓰면 도형 안 정렬과 날짜 간격까지 달라질 수 있다.
+    for top in pack.paras[first_heading:]:
         # 표·글상자 안의 문단도 같은 분류 규칙으로 확인한다. 표·개체 구조는 변경하지 않는다.
         for p in top.iter(f'{{{HP}}}p'):
             s = text(p)
             if not s.strip():
                 continue
             parent = p.getparent()
-            if i < first_heading:
-                name = '날짜' if re.match(r'^\s*\d{4}[.\-/]', s) else '바탕글'
-            elif heading(p):
+            if heading(p):
                 name = '추진'
                 active[parent] = '바탕글'
             elif re.match(r'^\s*\d{1,3}\.(?!\d)', s):
@@ -1405,7 +1405,7 @@ class App(tk.Tk):
         scroll = ttk.Scrollbar(log_row, orient='vertical', command=self.status.yview)
         scroll.pack(side='right', fill='y')
         self.status.config(yscrollcommand=scroll.set)
-        self.start_button = ttk.Button(right, text='최종 회의자료 만들기  →', style='Primary.TButton', command=self.start)
+        self.start_button = ttk.Button(right, text=f'{self.department} 최종 취합  →', style='Primary.TButton', command=self.start)
         self.start_button.grid(row=2, column=0, sticky='ew')
         scale_widget_spacing(box, self.ui_scale)
         self.date.trace_add('write', self.update_filename)
@@ -1455,7 +1455,7 @@ class App(tk.Tk):
         style.configure('Badge.TLabel', foreground='#171717', background='#e8e8e8', font=self.ui_fonts['small_bold'])
         style.configure('TButton', padding=p(12, 7), background='#eeeeee', foreground='#171717', borderwidth=0, relief='flat')
         style.map('TButton', background=[('disabled', '#eeeeee'), ('pressed', '#d9d9d9'), ('active', '#e2e2e2')], foreground=[('disabled', '#808080')])
-        style.configure('Department.TButton', padding=p(12, 6), font=self.ui_fonts['small_bold'],
+        style.configure('Department.TButton', padding=p(8, 6), font=self.ui_fonts['small_bold'],
                         background='#e8e8e8', foreground='#171717')
         style.map('Department.TButton',
                   background=[('selected', '#171717'), ('active', '#d9d9d9'), ('!selected', '#e8e8e8')],
@@ -1733,11 +1733,7 @@ class App(tk.Tk):
         combined = department == COMBINED_MODE
         (self.department_inputs if combined else self.final_inputs).grid_remove()
         (self.final_inputs if combined else self.department_inputs).grid()
-        self.order_help.set('생방기술1 → 생방기술2 순서로 자동 취합합니다.' if combined
-                            else '두 항목 모두 드래그 또는 이동 버튼으로 조정할 수 있습니다.')
-        for button in self.order_buttons:
-            button.configure(state='disabled' if combined else 'normal')
-        self.start_button.configure(text='생방기술국 최종 취합  →' if combined else '최종 회의자료 만들기  →')
+        self.start_button.configure(text=f'{department} 최종 취합  →')
         self.left_canvas.yview_moveto(0)
         self.invalidate()
         self.update_filename()
@@ -1794,7 +1790,7 @@ class App(tk.Tk):
     def drag_begin(self, kind, event):
         self.drag_start.pop(kind, None)
         listing = self.item_lists[kind]
-        if self.busy or self.department == COMBINED_MODE or not self.items[kind] or listing.identify_region(event.x, event.y) != 'cell':
+        if self.busy or not self.items[kind] or listing.identify_region(event.x, event.y) != 'cell':
             return
         row = listing.identify_row(event.y)
         if row:
@@ -1803,7 +1799,7 @@ class App(tk.Tk):
             listing.focus(row)
 
     def drag_motion(self, kind, event):
-        if self.busy or self.department == COMBINED_MODE or kind not in self.drag_start:
+        if self.busy or kind not in self.drag_start:
             return
         listing = self.item_lists[kind]
         if event.y < round(30*self.ui_scale):
@@ -1818,7 +1814,7 @@ class App(tk.Tk):
 
     def drag_end(self, kind, event):
         source = self.drag_start.pop(kind, None)
-        if self.busy or self.department == COMBINED_MODE or source is None:
+        if self.busy or source is None:
             return
         listing = self.item_lists[kind]
         rows = listing.get_children()
@@ -1836,7 +1832,7 @@ class App(tk.Tk):
     def move_item(self, kind, delta):
         listing = self.item_lists[kind]
         selected = listing.selection()
-        if self.busy or self.department == COMBINED_MODE or not selected:
+        if self.busy or not selected:
             return 'break'
         source = listing.index(selected[0])
         target = source+delta
@@ -1970,8 +1966,7 @@ class App(tk.Tk):
                 self.loaded_department = department
                 for section in KINDS:
                     self.refresh_items(section)
-                hint = (' — 생방기술1 → 생방기술2 순서로 취합합니다.' if department == COMBINED_MODE
-                        else ' — 각 탭에서 제목 순서를 확인하고 드래그하세요.')
+                hint = ' — 각 탭에서 제목 순서를 확인하고 드래그하세요.'
                 self.preview_state.set(' / '.join(f'{k} {len(items[k])}개' for k in KINDS) + hint)
                 self.set_busy(False)
                 continue
