@@ -789,7 +789,34 @@ def review_styles(source, destination, log):
         + ' / '.join(f'{k} {v}문단' for k,v in counts.items()))
 
 
-def merge(ordered, output, date, weekday, template, log, department='생방기술2'):
+def save_result(hwp, output, overwrite=False):
+    """새 결과를 같은 드라이브의 임시 파일로 검증한 뒤 최종 경로에 반영한다."""
+    output = Path(output)
+    with tempfile.TemporaryDirectory(prefix='.report_save_', dir=output.parent,
+                                     ignore_cleanup_errors=True) as folder:
+        staged = Path(folder) / ('result' + output.suffix.lower())
+        if not hwp.save_as(str(staged), format='HWPX' if output.suffix.lower() == '.hwpx' else 'HWP'):
+            raise RuntimeError('결과 임시 저장 실패. 기존 결과 파일은 변경하지 않았습니다.')
+        hwp.clear(1)
+        if not hwp.open(str(staged)):
+            raise RuntimeError('저장 결과 확인 실패. 기존 결과 파일은 변경하지 않았습니다.')
+        hwp.clear(1)  # 교체 전에 임시 파일의 한/글 잠금을 해제한다.
+        try:
+            if overwrite:
+                os.replace(staged, output)
+            else:
+                # Windows의 rename은 대상이 생기면 실패하므로 미승인 덮어쓰기를 막는다.
+                os.rename(staged, output)
+        except FileExistsError as e:
+            raise RuntimeError('취합 중 같은 이름의 파일이 생겼습니다. 다시 취합하여 저장 방법을 선택하세요.') from e
+        except PermissionError as e:
+            raise RuntimeError('결과 파일을 교체하거나 저장할 수 없습니다. 열려 있는 결과 파일을 한/글에서 닫고 '
+                               '저장 폴더 권한을 확인한 뒤 다시 취합하세요. 기존 결과는 유지됩니다.') from e
+    if not hwp.open(str(output)):
+        raise RuntimeError('저장했지만 결과 다시 열기에 실패했습니다.')
+
+
+def merge(ordered, output, date, weekday, template, log, department='생방기술2', overwrite=False):
     import pythoncom
     from pyhwpx import Hwp
     pythoncom.CoInitialize()
@@ -850,12 +877,7 @@ def merge(ordered, output, date, weekday, template, log, department='생방기�
             hwp.clear(1)
             if not hwp.open(str(reviewed)):
                 raise RuntimeError('스타일 정리 결과 열기 실패')
-            suffix = output.suffix.lower()
-            if not hwp.save_as(str(output), format='HWPX' if suffix == '.hwpx' else 'HWP'):
-                raise RuntimeError('결과 저장 실패')
-            hwp.clear(1)  # 임시 파일 잠금 해제
-            if not hwp.open(str(output)):
-                raise RuntimeError('저장했지만 결과 다시 열기에 실패했습니다.')
+            save_result(hwp, output, overwrite=overwrite)
             log(f'저장 완료: {output}')
     except Exception:
         if hwp is not None:
@@ -1087,6 +1109,46 @@ class CompletionDialog(tk.Toplevel):
             else:
                 self.geometry(f'{width}x{height}+{max(0, x)}+{max(0, y)}')
         self.update_idletasks()
+
+
+class OutputConflictDialog(tk.Toplevel):
+    def __init__(self, owner, output):
+        super().__init__(owner)
+        self.withdraw()
+        self.title('저장 파일 확인')
+        self.transient(owner)
+        self.resizable(False, False)
+        self.configure(bg='white')
+        self.ui_scale = owner.ui_scale
+        self.result = None
+        apply_app_icon(self)
+        body = ttk.Frame(self, padding=20, style='Card.TFrame')
+        body.pack(fill='both', expand=True)
+        ttk.Label(body, text='같은 이름의 파일이 있습니다.', style='Heading.TLabel').pack(anchor='w')
+        self.path_label = ttk.Label(body, text=str(output), style='Muted.TLabel',
+                                    wraplength=round(460*self.ui_scale))
+        self.path_label.pack(anchor='w', pady=(10, 8))
+        ttk.Label(body, text='기존 파일을 덮어쓰거나 다른 이름으로 저장하세요.').pack(anchor='w')
+        buttons = ttk.Frame(body)
+        buttons.pack(fill='x', pady=(20, 0))
+        self.overwrite_button = ttk.Button(buttons, text='덮어쓰기', command=lambda: self.choose('overwrite'))
+        self.overwrite_button.pack(side='left', padx=(0, 8))
+        self.rename_button = ttk.Button(buttons, text='이름 변경', command=lambda: self.choose('rename'))
+        self.rename_button.pack(side='left', padx=(0, 8))
+        self.cancel_button = ttk.Button(buttons, text='취소', command=self.destroy)
+        self.cancel_button.pack(side='right')
+        self.bind('<Escape>', lambda e: self.destroy())
+        self.bind('<Return>', lambda e: self.choose('rename'))
+        scale_widget_spacing(body, self.ui_scale)
+        self.update_idletasks()
+        self.deiconify()
+        CompletionDialog.place_centered(self, owner)
+        self.grab_set()
+        self.rename_button.focus_set()
+
+    def choose(self, result):
+        self.result = result
+        self.destroy()
 
 
 class BoundaryDialog(tk.Toplevel):
@@ -1941,6 +2003,35 @@ class App(tk.Tk):
                 self.events.put(('error', error))
         threading.Thread(target=worker, daemon=True).start()
 
+    def resolve_output(self, output, protected):
+        """충돌 시 덮어쓰기·이름 변경·취소를 선택하고 원본 경로는 보호한다."""
+        while True:
+            output = Path(output).resolve()
+            if output.suffix.lower() != '.hwp':
+                raise ValueError('결과 파일 이름의 확장자는 .hwp여야 합니다.')
+            if not output.parent.is_dir():
+                raise ValueError('저장 폴더가 존재하지 않습니다.')
+            if any(output == path.resolve() or (output.is_file() and path.is_file()
+                       and output.samefile(path)) for path in protected if path is not None):
+                raise ValueError('원본 파일을 결과 저장 위치로 지정할 수 없습니다.')
+            if not output.exists():
+                return output, False
+            if not output.is_file():
+                raise ValueError('결과 파일과 같은 이름의 폴더가 있습니다. 다른 저장 위치를 선택하세요.')
+            dialog = OutputConflictDialog(self, output)
+            self.wait_window(dialog)
+            if dialog.result == 'overwrite':
+                return output, True
+            if dialog.result != 'rename':
+                return None
+            name = filedialog.asksaveasfilename(
+                parent=self, title='다른 이름으로 저장', initialdir=str(output.parent),
+                initialfile=output.name, defaultextension='.hwp',
+                filetypes=[('한글 문서', '*.hwp')], confirmoverwrite=False)
+            if not name:
+                return None
+            output = Path(name)
+
     def start(self):
         self.close_calendar()
         if self.busy:
@@ -1961,20 +2052,15 @@ class App(tk.Tk):
             if not paths or not self.output.get().strip():
                 raise ValueError('파일과 저장 위치를 지정하세요.')
             output = Path(self.output.get()).resolve()
-            output = output.parent / output_name(date, department=self.output_department())
-            self.output.set(str(output))
             ordered = {k: list(self.items[k]) for k in KINDS}
             if not all(ordered.values()):
                 raise ValueError('추진실적과 추진계획을 모두 불러온 뒤 실행하세요.')
-            if output.suffix.lower() not in ('.hwp', '.hwpx'):
-                raise ValueError('결과 확장자는 .hwp 또는 .hwpx여야 합니다.')
-            if output in paths or output == template or output == previous:
-                raise ValueError('원본 파일을 결과 저장 위치로 지정할 수 없습니다.')
-            if output.exists():
-                raise ValueError('같은 이름의 결과 파일이 있습니다. 기존 결과의 이름을 바꾸거나 다른 저장 폴더를 선택하세요.')
-            if not output.parent.is_dir():
-                raise ValueError('저장 폴더가 존재하지 않습니다.')
-        except ValueError as e:
+            selection = self.resolve_output(output, [*paths, template, previous])
+            if selection is None:
+                return
+            output, overwrite = selection
+            self.output.set(str(output))
+        except (ValueError, OSError) as e:
             messagebox.showerror('입력 확인', str(e))
             return
         department = self.output_department()
@@ -1983,7 +2069,7 @@ class App(tk.Tk):
         def worker():
             try:
                 merge(ordered, output, date, weekday, template,
-                      lambda s: self.events.put(('log', s)), department=department)
+                      lambda s: self.events.put(('log', s)), department=department, overwrite=overwrite)
                 self.events.put(('done', str(output)))
             except Exception:
                 self.events.put(('error', traceback.format_exc()))

@@ -337,7 +337,7 @@ class ReportUiTests(unittest.TestCase):
                 self.assertEqual(self.keys(kind), before[kind][::-1])
                 self.assertNotIn(kind, self.app.drag_start)
             wanted = {k: list(self.app.items[k]) for k in self.module.KINDS}
-            self.app.output.set(str(Path(folder)/'placeholder.hwp'))
+            self.app.output.set(str(Path(folder)/'생방기술국_회의자료_261101.hwp'))
             with patch.object(self.module, 'merge') as merge, \
                     patch.object(self.module, 'CompletionDialog', return_value=None):
                 self.app.start()
@@ -359,6 +359,103 @@ class ReportUiTests(unittest.TestCase):
         self.app.open_calendar()
         self.app.calendar_popup.change_month(1)
         self.assertEqual((self.app.calendar_popup.year, self.app.calendar_popup.month), (2027, 1))
+
+    def test_output_conflict_dialog_buttons_cancel_and_default_rename(self):
+        for action in ('overwrite', 'rename', 'cancel', 'enter'):
+            dialog = self.module.OutputConflictDialog(self.app, Path('검토 폴더/회의자료.hwp'))
+            self.app.update()
+            self.assertIn('회의자료.hwp', dialog.path_label.cget('text'))
+            if action == 'enter':
+                dialog.event_generate('<Return>')
+            else:
+                getattr(dialog, action+'_button').invoke()
+            self.assertFalse(dialog.winfo_exists())
+            self.assertEqual(dialog.result, {'cancel':None, 'enter':'rename'}.get(action, action))
+        dialog = self.module.OutputConflictDialog(self.app, Path('회의자료.hwp'))
+        self.app.update()
+        dialog.event_generate('<Escape>')
+        self.assertIsNone(dialog.result)
+        self.assertFalse(dialog.winfo_exists())
+
+    def test_output_resolution_overwrite_rename_recheck_and_cancel(self):
+        with tempfile.TemporaryDirectory() as folder:
+            original = Path(folder)/'회의자료.hwp'
+            original.write_bytes(b'previous')
+            renamed = Path(folder)/'회의자료_수정.hwp'
+            existing = Path(folder)/'다른결과.hwp'
+            existing.write_bytes(b'other')
+            with patch.object(self.app, 'wait_window'), \
+                    patch.object(self.module, 'OutputConflictDialog', return_value=SimpleNamespace(result='overwrite')):
+                self.assertEqual(self.app.resolve_output(original, []), (original.resolve(), True))
+            with patch.object(self.app, 'wait_window'), \
+                    patch.object(self.module, 'OutputConflictDialog', side_effect=[SimpleNamespace(result='rename'), SimpleNamespace(result='overwrite')]) as dialog, \
+                    patch.object(self.module.filedialog, 'asksaveasfilename', return_value=str(existing)):
+                self.assertEqual(self.app.resolve_output(original, []), (existing.resolve(), True))
+                self.assertEqual(dialog.call_count, 2)
+            with patch.object(self.app, 'wait_window'), \
+                    patch.object(self.module, 'OutputConflictDialog', return_value=SimpleNamespace(result='rename')), \
+                    patch.object(self.module.filedialog, 'asksaveasfilename', return_value=str(renamed)):
+                self.assertEqual(self.app.resolve_output(original, []), (renamed.resolve(), False))
+            for action, name in ((None, None), ('rename', '')):
+                with patch.object(self.app, 'wait_window'), \
+                        patch.object(self.module, 'OutputConflictDialog', return_value=SimpleNamespace(result=action)), \
+                        patch.object(self.module.filedialog, 'asksaveasfilename', return_value=name):
+                    self.assertIsNone(self.app.resolve_output(original, []))
+            self.assertEqual(original.read_bytes(), b'previous')
+            self.assertEqual(existing.read_bytes(), b'other')
+
+    def test_output_resolution_protects_sources_and_checks_renamed_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder)/'원본.hwp'
+            source.touch()
+            existing = Path(folder)/'결과.hwp'
+            existing.touch()
+            with patch.object(self.module, 'OutputConflictDialog') as dialog:
+                with self.assertRaisesRegex(ValueError, '원본'):
+                    self.app.resolve_output(source, [source])
+                dialog.assert_not_called()
+            for target, error in ((source, '원본'), (Path(folder)/'잘못.txt', '확장자')):
+                with patch.object(self.app, 'wait_window'), \
+                        patch.object(self.module, 'OutputConflictDialog', return_value=SimpleNamespace(result='rename')), \
+                        patch.object(self.module.filedialog, 'asksaveasfilename', return_value=str(target)):
+                    with self.assertRaisesRegex(ValueError, error):
+                        self.app.resolve_output(existing, [source])
+
+    def test_start_keeps_custom_filename_and_passes_overwrite_for_all_modes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for mode in self.module.MODES:
+                self.app.select_department(mode)
+                paths = [Path(folder)/f'input_{n}.hwp' for n in (1, 2)]
+                self.app.paths = paths
+                self.app.final_paths = dict(zip(self.module.DEPARTMENTS, paths))
+                self.app.previous_path = Path(folder)/'previous.hwp'
+                inputs, previous = self.app.current_inputs()
+                self.app.loaded_paths = inputs
+                self.app.loaded_previous = previous
+                self.app.loaded_department = mode
+                self.app.cache_dir = SimpleNamespace(cleanup=lambda: None)
+                self.app.items = {k: [self.module.WorkItem(k, k, '업무', paths[0], paths[0], 0, 1)]
+                                  for k in self.module.KINDS}
+                target = Path(folder)/f'{mode}_검토용.hwp'
+                self.app.output.set(str(target))
+                with patch.object(self.app, 'resolve_output', return_value=None), \
+                        patch.object(self.module, 'merge') as merge:
+                    self.app.start()
+                    merge.assert_not_called()
+                    self.assertFalse(self.app.busy)
+                with patch.object(self.app, 'resolve_output', return_value=(target, True)), \
+                        patch.object(self.module, 'merge') as merge, \
+                        patch.object(self.module, 'CompletionDialog', return_value=None):
+                    self.app.start()
+                    deadline = time.monotonic()+5
+                    while self.app.busy and time.monotonic() < deadline:
+                        self.app.update()
+                        time.sleep(.01)
+                    self.assertFalse(self.app.busy)
+                    self.assertEqual(merge.call_args.args[1], target)
+                    self.assertTrue(merge.call_args.kwargs['overwrite'])
+                    self.assertEqual(self.app.output.get(), str(target))
+            self.app.cache_dir = None
 
     def test_outer_input_scrollbar_is_removed_but_wheel_remains_bound(self):
         shell = self.app.left_canvas.master
