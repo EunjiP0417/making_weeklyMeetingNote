@@ -55,6 +55,22 @@ def output_name(date, extension='.hwp', department='생방기술국'):
     return f'{department}_회의자료_{report_date(date):%y%m%d}{extension}'
 
 
+def result_filename(value):
+    """직접 입력한 Windows 파일 이름을 확인하고 생략한 HWP 확장자를 붙인다."""
+    name = value.strip()
+    if not name:
+        raise ValueError('저장할 파일 이름을 입력하세요.')
+    if re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith('.'):
+        raise ValueError('파일 이름에는 경로 문자나 <>:"/\\|?*를 사용할 수 없으며 점으로 끝낼 수 없습니다.')
+    if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', name, re.I):
+        raise ValueError('Windows에서 예약한 이름입니다. 다른 파일 이름을 입력하세요.')
+    if not Path(name).suffix:
+        name += '.hwp'
+    if Path(name).suffix.lower() != '.hwp':
+        raise ValueError('결과 파일 이름의 확장자는 .hwp여야 합니다.')
+    return name
+
+
 def weekday_name(date):
     return '월화수목금토일'[report_date(date).weekday()]
 
@@ -1350,9 +1366,12 @@ class App(tk.Tk):
         self.date = tk.StringVar(value=dt.date.today().strftime('%Y.%m.%d.'))
         self.weekday = tk.StringVar(value=weekday_name(self.date.get())+'요일')
         self.output = tk.StringVar()
+        self.output_folder = None
+        self._syncing_output = False
+        self.filename = tk.StringVar(value=output_name(self.date.get(), department=self.department))
         self.output_text = tk.StringVar(value='저장 폴더를 선택하세요')
-        self.output.trace_add('write', lambda *_: self.output_text.set(
-            self.output.get() or '저장 폴더를 선택하세요'))
+        self.output.trace_add('write', self.sync_output_fields)
+        self.filename.trace_add('write', self.sync_output_filename)
         self.previous_text = tk.StringVar(value='선택된 파일이 없습니다')
         self.preview_state = tk.StringVar(value='파일 선택 후 업무 제목을 불러오세요.')
 
@@ -1458,6 +1477,9 @@ class App(tk.Tk):
         ttk.Label(date_row, textvariable=self.weekday, style='Accent.TLabel').pack(side='left', padx=(8, 0))
         ttk.Button(body, text='저장 폴더 선택', command=self.choose_output).pack(fill='x', pady=(0, 8))
         ttk.Entry(body, textvariable=self.output_text, state='readonly', width=28).pack(fill='x')
+        ttk.Label(body, text='파일 이름', style='Muted.TLabel').pack(anchor='w', pady=(8, 4))
+        self.filename_entry = ttk.Entry(body, textvariable=self.filename, width=28)
+        self.filename_entry.pack(fill='x')
 
         right = ttk.Frame(box, style='Page.TFrame')
         right.grid(row=1, column=1, sticky='nsew')
@@ -1796,10 +1818,31 @@ class App(tk.Tk):
             return
         name = filedialog.askdirectory(title='최종 회의자료를 저장할 폴더')
         if name:
-            try:
-                self.output.set(str(Path(name) / output_name(self.date.get(), department=self.output_department())))
-            except ValueError as e:
-                messagebox.showerror('날짜 확인', str(e))
+            self.output_folder = Path(name)
+            self.sync_output_filename()
+
+    def sync_output_fields(self, *_):
+        if self._syncing_output:
+            return
+        self._syncing_output = True
+        try:
+            value = self.output.get()
+            self.output_folder = Path(value).parent if value else None
+            self.output_text.set(str(self.output_folder) if value else '저장 폴더를 선택하세요')
+            if value:
+                self.filename.set(Path(value).name)
+        finally:
+            self._syncing_output = False
+
+    def sync_output_filename(self, *_):
+        if self._syncing_output or self.output_folder is None:
+            return
+        self._syncing_output = True
+        try:
+            self.output_text.set(str(self.output_folder))
+            self.output.set(str(self.output_folder / self.filename.get()))
+        finally:
+            self._syncing_output = False
 
     def choose_previous(self):
         if self.busy:
@@ -1815,13 +1858,9 @@ class App(tk.Tk):
     def update_filename(self, *_):
         try:
             self.weekday.set(weekday_name(self.date.get()) + '요일')
+            self.filename.set(output_name(self.date.get(), department=self.output_department()))
         except ValueError:
             self.weekday.set('날짜 확인')
-        if self.output.get():
-            try:
-                self.output.set(str(Path(self.output.get()).parent / output_name(self.date.get(), department=self.output_department())))
-            except ValueError:
-                pass
 
     def invalidate(self):
         self.loaded_paths = None
@@ -1873,6 +1912,7 @@ class App(tk.Tk):
         self.start_button.configure(state=state)
         self.load_button.configure(state=state)
         self.final_load_button.configure(state=state)
+        self.filename_entry.configure(state=state)
         for button in self.department_buttons.values():
             button.configure(state=state)
 
@@ -2049,9 +2089,11 @@ class App(tk.Tk):
             template = TEMPLATE_PATH
             if not template.is_file():
                 raise ValueError('프로그램의 내장 자료를 읽을 수 없습니다. 배포 파일을 다시 받아주세요.')
-            if not paths or not self.output.get().strip():
+            name = result_filename(self.filename.get())
+            if not paths or self.output_folder is None:
                 raise ValueError('파일과 저장 위치를 지정하세요.')
-            output = Path(self.output.get()).resolve()
+            self.filename.set(name)
+            output = (self.output_folder / name).resolve()
             ordered = {k: list(self.items[k]) for k in KINDS}
             if not all(ordered.values()):
                 raise ValueError('추진실적과 추진계획을 모두 불러온 뒤 실행하세요.')

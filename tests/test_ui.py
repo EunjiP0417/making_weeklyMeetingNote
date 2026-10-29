@@ -360,6 +360,73 @@ class ReportUiTests(unittest.TestCase):
         self.app.calendar_popup.change_month(1)
         self.assertEqual((self.app.calendar_popup.year, self.app.calendar_popup.month), (2027, 1))
 
+    def test_filename_can_be_edited_and_saved_without_conflict_in_all_modes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            paths = [folder/f'input_{n}.hwp' for n in (1, 2)]
+            for path in paths:
+                path.touch()
+            for mode in self.module.MODES:
+                self.app.select_department(mode)
+                self.app.date.set('2026.10.29.')
+                self.app.output.set('')
+                self.assertEqual(self.app.filename_entry.get(), f'{mode}_회의자료_261029.hwp')
+                name = f'{mode}_직접 지정한 이름'
+                self.app.filename_entry.delete(0, 'end')
+                self.app.filename_entry.insert(0, name)
+                self.assertEqual(self.app.output.get(), '')
+                with patch.object(self.module.filedialog, 'askdirectory', return_value=str(folder)):
+                    self.app.choose_output()
+                self.assertEqual(self.app.filename_entry.get(), name)
+                self.app.paths = paths
+                self.app.final_paths = dict(zip(self.module.DEPARTMENTS, paths))
+                self.app.previous_path = folder/'previous.hwp'
+                inputs, previous = self.app.current_inputs()
+                self.app.loaded_paths = inputs
+                self.app.loaded_previous = previous
+                self.app.loaded_department = mode
+                self.app.cache_dir = SimpleNamespace(cleanup=lambda: None)
+                self.app.items = {k:[self.module.WorkItem(k, k, '업무', paths[0], paths[0], 0, 1)]
+                                  for k in self.module.KINDS}
+                with patch.object(self.module, 'merge') as merge, \
+                        patch.object(self.module, 'OutputConflictDialog', side_effect=AssertionError('중복 없음')), \
+                        patch.object(self.module, 'CompletionDialog', return_value=None):
+                    self.app.start()
+                    deadline = time.monotonic()+5
+                    while self.app.busy and time.monotonic() < deadline:
+                        self.app.update()
+                        time.sleep(.01)
+                    self.assertFalse(self.app.busy)
+                    self.assertEqual(merge.call_args.args[1], (folder/(name+'.hwp')).resolve())
+                    self.assertFalse(merge.call_args.kwargs['overwrite'])
+                self.assertEqual(self.app.filename_entry.get(), name+'.hwp')
+                self.assertEqual(self.app.output_text.get(), str(folder.resolve()))
+            self.app.cache_dir = None
+
+    def test_filename_editing_keeps_folder_and_syncs_external_renames(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            self.app.output.set(str(folder/'자동이름.hwp'))
+            self.app.filename_entry.delete(0, 'end')
+            self.assertEqual(self.app.output_folder, folder)
+            self.app.filename_entry.insert(0, '원하는 이름.hwp')
+            self.assertEqual(self.app.output.get(), str(folder/'원하는 이름.hwp'))
+            other = folder/'다른 폴더'
+            other.mkdir()
+            with patch.object(self.module.filedialog, 'askdirectory', return_value=str(other)):
+                self.app.choose_output()
+            self.assertEqual(self.app.output.get(), str(other/'원하는 이름.hwp'))
+            self.app.set_busy(True)
+            self.app.filename_entry.delete(0, 'end')
+            self.assertEqual(self.app.filename_entry.get(), '원하는 이름.hwp')
+            self.app.set_busy(False)
+            self.app.output.set(str(folder/'팝업에서바꾼이름.hwp'))
+            self.assertEqual(self.app.filename_entry.get(), '팝업에서바꾼이름.hwp')
+            self.assertEqual(self.app.output_text.get(), str(folder))
+            self.app.date.set('2026.10.30.')
+            self.assertEqual(self.app.filename_entry.get(), '생방기술2_회의자료_261030.hwp')
+            self.assertEqual(self.app.output_folder, folder)
+
     def test_output_conflict_dialog_buttons_cancel_and_default_rename(self):
         for action in ('overwrite', 'rename', 'cancel', 'enter'):
             dialog = self.module.OutputConflictDialog(self.app, Path('검토 폴더/회의자료.hwp'))

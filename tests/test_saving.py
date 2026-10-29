@@ -40,6 +40,16 @@ class ResultSavingTests(unittest.TestCase):
         self.folder = Path(self.temp.name)
         self.output = self.folder/'회의자료.hwp'
 
+    def test_direct_filename_accepts_custom_names_and_rejects_paths_or_invalid_names(self):
+        for value, expected in (('검토용 회의자료', '검토용 회의자료.hwp'),
+                                ('생방기술1_수정.HWP', '생방기술1_수정.HWP'),
+                                ('  최종본.hwp  ', '최종본.hwp')):
+            self.assertEqual(report.result_filename(value), expected)
+        for value in ('', '   ', '../원본.hwp', 'C:\\원본.hwp', '잘못?.hwp',
+                      'CON.hwp', 'nul', '제목.', '제목.txt'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                report.result_filename(value)
+
     def test_overwrite_replaces_only_after_new_report_validates(self):
         self.output.write_bytes(b'old report')
         hwp = FakeHwp(on_validate=lambda: self.assertEqual(self.output.read_bytes(), b'old report'))
