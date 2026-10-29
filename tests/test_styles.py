@@ -136,24 +136,75 @@ class StyleReviewTests(unittest.TestCase):
                 self.assertEqual(paragraph_shape(result.shapes[p.get('paraPrIDRef')]),
                                  paragraph_shape(result.shapes[styles[name].get('paraPrIDRef')]))
 
-    def test_known_markers_inside_tables_are_checked_without_changing_table_structure(self):
+    def test_all_table_content_and_host_paragraph_keep_original_formatting(self):
         wrong = self.add_shape()
-        p = self.add_para('', wrong)
+        hanging = self.add_shape(intent=-800)
+        p = self.add_para('   - 표가 놓인 줄', wrong)
         table = E.SubElement(p.find('hp:run', report.NS), f'{{{report.HP}}}tbl', id='123')
         cell = E.SubElement(table, f'{{{report.HP}}}tc')
-        for value in ('   - 표 안 업무', '   · 표 안 상세'):
-            q = self.add_para(value, wrong)
+        for value, shape, style in (('   - 표 안 업무', wrong, '-'),
+                                    ('   · 표 안 상세', hanging, '\uf0a0'),
+                                    ('   7. 표 안 번호', wrong, '1,2,3'),
+                                    ('<추진계획>', wrong, '추진'),
+                                    ('  기호 없는 셀 내용', wrong, '-'),
+                                    ('10.26.(월)', wrong, '-'),
+                                    ('가수, 총 2화 녹음', wrong, '-'),
+                                    ('  ', hanging, '바탕글')):
+            q = self.add_para(value, shape, style)
             self.pack.root.remove(q)
             cell.append(q)
+        inline = cell[0].find('hp:run/hp:t', report.NS)
+        E.SubElement(inline, f'{{{report.HP}}}tab', width='500').tail = ' 탭 뒤 공백'
+        E.SubElement(inline, f'{{{report.HP}}}lineBreak').tail = '  둘째 줄'
+        nested = E.SubElement(cell[-1].find('hp:run', report.NS), f'{{{report.HP}}}tbl', id='nested')
+        nested_cell = E.SubElement(nested, f'{{{report.HP}}}tc')
+        q = self.add_para('  - 중첩 표 본문', wrong, '-')
+        self.pack.root.remove(q)
+        nested_cell.append(q)
+        before = E.tostring(p, method='c14n')
         result = self.review()
-        table = next(x for x in result.root.iter() if report.local(x) == 'tbl' and x.get('id') == '123')
-        self.assertEqual(len(table), 1)
-        styles = {s.get('name'): s for s in result.header.iter() if report.local(s) == 'style'}
-        for p, name in zip(table.iter(f'{{{report.HP}}}p'), ('-', '·')):
-            self.assertEqual(p.get('styleIDRef'), styles[name].get('id'))
-            self.assertFalse(report.text(p).startswith(' '))
-            self.assertEqual(layout(result.shapes[p.get('paraPrIDRef')]),
-                             layout(result.shapes[styles[name].get('paraPrIDRef')]))
+        actual = next(q for q in result.paras if report.text(q) == '   - 표가 놓인 줄')
+        self.assertEqual(E.tostring(actual, method='c14n'), before)
+        for ident in (wrong, hanging):
+            self.assertEqual(paragraph_shape(result.shapes[ident]), paragraph_shape(self.pack.shapes[ident]))
+
+    def test_picture_host_and_caption_preserved_but_adjacent_body_is_normalized(self):
+        wrong = self.add_shape()
+        host = self.add_para('   - 사진 설명', wrong, '-')
+        run = host.find('hp:run', report.NS)
+        picture = E.SubElement(run, f'{{{report.HP}}}pic', id='picture1')
+        E.SubElement(picture, f'{{{report.HP}}}pos', treatAsChar='1', horzOffset='1234')
+        E.SubElement(picture, f'{{{report.HP}}}sz', width='10000', height='8000')
+        E.SubElement(picture, f'{{{report.HP}}}img', binaryItemIDRef='image1')
+        caption = E.SubElement(picture, f'{{{report.HP}}}caption')
+        p = self.add_para('   · 사진 캡션', wrong, '\uf0a0')
+        self.pack.root.remove(p)
+        caption.append(p)
+        self.pack.data['BinData/image1.png'] = b'original-image-payload'
+        before = E.tostring(host, method='c14n')
+        self.add_para('   - 일반 본문', wrong)
+        result = self.review()
+        self.assertEqual(E.tostring(result.paras[-2], method='c14n'), before)
+        self.assertEqual(result.data['BinData/image1.png'], self.pack.data['BinData/image1.png'])
+        body = result.paras[-1]
+        self.assertEqual(report.text(body), '- 일반 본문')
+        self.assertEqual(body.get('styleIDRef'), self.styles['-'].get('id'))
+        self.assertNotEqual(layout(result.shapes[body.get('paraPrIDRef')]), layout(self.pack.shapes[wrong]))
+
+    def test_grouped_image_textbox_and_empty_object_host_are_preserved(self):
+        wrong = self.add_shape()
+        for value in ('', '   5. 이미지가 붙은 번호 줄'):
+            host = self.add_para(value, wrong)
+            container = E.SubElement(host.find('hp:run', report.NS), f'{{{report.HP}}}container')
+            E.SubElement(container, f'{{{report.HP}}}pic', id='grouped_picture')
+            rect = E.SubElement(container, f'{{{report.HP}}}rect')
+            textbox = E.SubElement(rect, f'{{{report.HP}}}drawText')
+            p = self.add_para('   - 그림 안 글상자', wrong, '-')
+            self.pack.root.remove(p)
+            textbox.append(p)
+        before = [E.tostring(p, method='c14n') for p in list(self.pack.root)[-2:]]
+        result = self.review()
+        self.assertEqual([E.tostring(p, method='c14n') for p in result.paras[-2:]], before)
 
     def test_plain_table_cells_keep_their_existing_layout(self):
         original_shape = self.add_shape(intent=-800)

@@ -34,6 +34,11 @@ APP_IMAGE = Path(__file__).resolve().parent / 'assets' / 'app.png'
 # 업무 제목: 1. 제목, 1.1. 제목, 4.1. 제목. 날짜/소수점은 제외.
 PREFIX = re.compile(r'^\s*(?:\d{1,3}\s*\.\s*)+(?!\d)')
 ITEM_TOKEN = re.compile(r'^\s*REPORT_ITEM_[0-9a-f]{32}\s*')
+# 개체가 놓인 문단의 여백·정렬도 개체 배치의 일부이므로 본문 스타일로 바꾸지 않는다.
+LAYOUT_OBJECTS = frozenset({
+    'tbl', 'pic', 'container', 'ole', 'chart', 'video', 'equation',
+    'line', 'rect', 'ellipse', 'arc', 'polygon', 'curve', 'connectLine', 'textart',
+})
 
 
 def report_date(value):
@@ -655,7 +660,7 @@ def prepare_final(paths, folder, log):
 
 
 def review_styles(source, destination, log):
-    """지정 스타일의 문단 서식을 적용하되 실제 내어쓰기 정렬만 보존한다."""
+    """일반 본문만 교정하고 표·그림 내부와 개체가 놓인 문단은 보존한다."""
     pack = Package(source)
     styles = {x.get('name'): x for x in pack.header.iter()
               if local(x) == 'style' and x.get('type') == 'PARA'}
@@ -691,6 +696,7 @@ def review_styles(source, destination, log):
     checked = []
     hanging_shapes = {}
     preserved = 0
+    object_paragraphs = 0
 
     def apply(p, name):
         nonlocal preserved
@@ -743,7 +749,11 @@ def review_styles(source, destination, log):
     # 제목 도형·날짜·그 앞뒤 빈 문단은 내장 양식 그대로 둔다.
     # 상단에 본문 스타일을 덮어쓰면 도형 안 정렬과 날짜 간격까지 달라질 수 있다.
     for top in pack.paras[first_heading:]:
-        # 표·글상자 안의 문단도 같은 분류 규칙으로 확인한다. 표·개체 구조는 변경하지 않는다.
+        if any(local(x) in LAYOUT_OBJECTS for x in top.iter()):
+            # 표 안의 번호·기호·공백과 그림의 캡션·글상자까지 원본 그대로 둔다.
+            # 개체가 있는 바깥 문단에도 스타일·선행 공백 제거를 적용하지 않는다.
+            object_paragraphs += 1
+            continue
         for p in top.iter(f'{{{HP}}}p'):
             s = text(p)
             if not s.strip():
@@ -763,11 +773,6 @@ def review_styles(source, destination, log):
             else:
                 # 기호 없는 이어지는 문단도 원래 본문 스타일 또는 직전 본문 단계를 적용한다.
                 old_name = style_names.get(p.get('styleIDRef'))
-                # 표의 일반 셀(열 이름·프로그램명 등)은 제목/번호/기호 문단에 해당하지 않는다.
-                # 해당 역할이 식별된 셀 문단과 그 이어지는 문단에만 위 규칙을 적용한다.
-                if (any(local(a) == 'tbl' for a in p.iterancestors())
-                        and old_name not in ('-', '·') and parent not in active):
-                    continue
                 name = old_name if old_name in ('-', '·') else active.get(parent, '바탕글')
             apply(p, name)
     for p,name in checked:
@@ -779,7 +784,8 @@ def review_styles(source, destination, log):
     data[pack.section_name] = E.tostring(pack.root, encoding='UTF-8', xml_declaration=True)
     data['Contents/header.xml'] = E.tostring(pack.header, encoding='UTF-8', xml_declaration=True)
     write_package(data, destination)
-    log(f'최종 스타일 검사 완료 (스타일 문단 서식 적용·선행 공백 제거, 내어쓰기 {preserved}문단 정렬 유지): '
+    log(f'최종 스타일 검사 완료 (일반 본문 교정, 내어쓰기 {preserved}문단 정렬 유지, '
+        f'표·그림 개체 문단 {object_paragraphs}개 원본 유지): '
         + ' / '.join(f'{k} {v}문단' for k,v in counts.items()))
 
 
